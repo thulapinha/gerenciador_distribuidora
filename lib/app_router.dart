@@ -8,6 +8,7 @@ import 'ui/pages/customers_page.dart';
 import 'ui/pages/stock_page.dart';
 import 'ui/pages/orders_page.dart';
 import 'ui/pages/billing_sim_page.dart';
+import 'ui/pages/pdv_page.dart';
 import 'ui/pages/inventory_count_page.dart';
 import 'ui/pages/reports_page.dart';
 
@@ -22,6 +23,7 @@ GoRouter buildRouter() {
           GoRoute(path: '/clientes', builder: (_, __) => const CustomersPage()),
           GoRoute(path: '/estoque', builder: (_, __) => const StockPage()),
           GoRoute(path: '/pedidos', builder: (_, __) => const OrdersPage()),
+          GoRoute(path: '/pdv', builder: (_, __) => const PdvPage()),
           GoRoute(path: '/faturamento_sim', builder: (_, __) => const BillingSimPage()),
           GoRoute(path: '/inventario', builder: (_, __) => const InventoryCountPage()),
           GoRoute(path: '/relatorios', builder: (_, __) => const ReportsPage()),

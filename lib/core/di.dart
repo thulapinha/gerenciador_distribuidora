@@ -5,6 +5,7 @@ import '../data/app_database.dart';
 import '../domain/services/inventory_service.dart';
 import '../domain/services/order_service.dart';
 import '../domain/services/billing_service.dart';
+import '../domain/services/sales_service.dart';
 
 class AppProviders extends StatelessWidget {
   final Widget child;
@@ -22,6 +23,8 @@ class AppProviders extends StatelessWidget {
             Provider(create: (_) => InventoryService(db)),
             Provider(create: (ctx) => OrderService(db, ctx.read<InventoryService>())),
             Provider(create: (ctx) => BillingService(db, ctx.read<InventoryService>())),
+            Provider(create: (ctx) =>
+                SalesService(db, ctx.read<InventoryService>(), ctx.read<BillingService>())),
           ],
           child: child,
         );

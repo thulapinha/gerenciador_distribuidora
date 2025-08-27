@@ -12,7 +12,15 @@ class ShellScaffold extends StatelessWidget {
 
     int indexFromRoute() {
       return [
-        '/', '/produtos', '/clientes', '/estoque', '/pedidos', '/faturamento_sim', '/inventario', '/relatorios'
+        '/',
+        '/produtos',
+        '/clientes',
+        '/estoque',
+        '/pedidos',
+        '/pdv',
+        '/faturamento_sim',
+        '/inventario',
+        '/relatorios'
       ].indexOf(route);
     }
 
@@ -20,9 +28,19 @@ class ShellScaffold extends StatelessWidget {
       body: Row(
         children: [
           NavigationRail(
-            selectedIndex: indexFromRoute().clamp(0, 7),
+            selectedIndex: indexFromRoute().clamp(0, 8),
             onDestinationSelected: (i) {
-              final paths = ['/', '/produtos', '/clientes', '/estoque', '/pedidos', '/faturamento_sim', '/inventario', '/relatorios'];
+              final paths = [
+                '/',
+                '/produtos',
+                '/clientes',
+                '/estoque',
+                '/pedidos',
+                '/pdv',
+                '/faturamento_sim',
+                '/inventario',
+                '/relatorios'
+              ];
               context.go(paths[i]);
             },
             labelType: NavigationRailLabelType.all,
@@ -32,6 +50,7 @@ class ShellScaffold extends StatelessWidget {
               NavigationRailDestination(icon: Icon(Icons.people_alt_outlined), label: Text('Clientes')),
               NavigationRailDestination(icon: Icon(Icons.warehouse_outlined), label: Text('Estoque')),
               NavigationRailDestination(icon: Icon(Icons.receipt_long_outlined), label: Text('Pedidos')),
+              NavigationRailDestination(icon: Icon(Icons.point_of_sale_outlined), label: Text('PDV')),
               NavigationRailDestination(icon: Icon(Icons.description_outlined), label: Text('NF Sim')),
               NavigationRailDestination(icon: Icon(Icons.fact_check_outlined), label: Text('Inventário')),
               NavigationRailDestination(icon: Icon(Icons.summarize_outlined), label: Text('Relatórios')),
