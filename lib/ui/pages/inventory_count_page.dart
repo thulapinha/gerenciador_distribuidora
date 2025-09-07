@@ -1,51 +1,109 @@
 import 'package:flutter/material.dart';
-import 'package:provider/provider.dart';
-import '../../../data/app_database.dart';
-import 'package:drift/drift.dart' as d;
+import 'package:parse_server_sdk_flutter/parse_server_sdk_flutter.dart';
 
-
-class InventoryCountPage extends StatelessWidget {
+class InventoryCountPage extends StatefulWidget {
   const InventoryCountPage({super.key});
+
+  @override
+  State<InventoryCountPage> createState() => _InventoryCountPageState();
+}
+
+class _InventoryCountPageState extends State<InventoryCountPage> {
+  bool _loading = true;
+  final _searchCtl = TextEditingController();
+  List<ParseObject> _all = [];
+  List<ParseObject> _filtered = [];
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+    _searchCtl.addListener(_apply);
+  }
+
+  @override
+  void dispose() {
+    _searchCtl.dispose();
+    super.dispose();
+  }
+
+  Future<void> _load() async {
+    setState(() => _loading = true);
+    try {
+      final q = QueryBuilder(ParseObject('Product'))
+        ..orderByAscending('name')
+        ..setLimit(1000);
+      final r = await q.query();
+      if (!r.success) throw Exception(r.error?.message);
+      _all = (r.results ?? []).cast<ParseObject>();
+      _filtered = _all;
+    } catch (e) {
+      _snack('Erro: $e');
+    } finally {
+      setState(() => _loading = false);
+    }
+  }
+
+  void _apply() {
+    final t = _searchCtl.text.toLowerCase().trim();
+    setState(() {
+      if (t.isEmpty) {
+        _filtered = _all;
+      } else {
+        _filtered = _all.where((o) {
+          final n = (o.get<String>('name') ?? '').toLowerCase();
+          final sku = (o.get<String>('sku') ?? '').toLowerCase();
+          return n.contains(t) || sku.contains(t);
+        }).toList();
+      }
+    });
+  }
+
+  void _snack(String m) =>
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(m)));
+
   @override
   Widget build(BuildContext context) {
-    final db = context.watch<AppDatabase>();
     return Scaffold(
       appBar: AppBar(title: const Text('Inventário Cíclico')),
-      body: FutureBuilder(
-        future: db.select(db.products).get(),
-        builder: (_, snap) {
-          final prods = snap.data ?? [];
-          return ListView.separated(
-            itemCount: prods.length,
-            separatorBuilder: (_, __) => const Divider(height: 1),
-            itemBuilder: (_, i) {
-              final p = prods[i];
-              return ListTile(
-                title: Text(p.description),
-                subtitle: Text('SKU ${p.sku}'),
-                onTap: () async {
-                  // Contagem simplificada: soma por produto e ajusta em um clique
-                  final rows = await (db.select(db.stock)..where((s) => s.productId.equals(p.id))).get();
-                  final current = rows.fold<double>(0.0, (s, e) => s + e.qty);
-                  final newQty = current + 10; // exemplo: contagem encontrou +10
-                  for (final s in rows) {
-                    final share = s.qty / current;
-                    final add = current == 0 ? 0 : (newQty - current) * share;
-                    await (db.update(db.stock)..where((t) => t.id.equals(s.id))).write(
-                        StockCompanion(qty: d.Value(s.qty + add))
-
-                    );
-                  }
-                  if (context.mounted) {
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      SnackBar(content: Text('Ajuste aplicado para ${p.description}.')),
-                    );
-                  }
+      body: Column(
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(12, 12, 12, 0),
+            child: TextField(
+              controller: _searchCtl,
+              decoration: const InputDecoration(
+                border: OutlineInputBorder(),
+                prefixIcon: Icon(Icons.search),
+                labelText: 'Buscar por nome/SKU',
+              ),
+            ),
+          ),
+          const SizedBox(height: 8),
+          Expanded(
+            child: _loading
+                ? const Center(child: CircularProgressIndicator())
+                : RefreshIndicator(
+              onRefresh: _load,
+              child: ListView.separated(
+                itemCount: _filtered.length,
+                separatorBuilder: (_, __) => const Divider(height: 1),
+                itemBuilder: (_, i) {
+                  final o = _filtered[i];
+                  final name = o.get<String>('name') ?? '-';
+                  final sku = o.get<String>('sku') ?? '-';
+                  final unit = o.get<String>('unit') ?? 'UN';
+                  final stock = (o.get<num>('stock') ?? 0).toDouble();
+                  return ListTile(
+                    title: Text(name),
+                    subtitle: Text('SKU $sku'),
+                    trailing: Text('${stock.toStringAsFixed(stock.truncateToDouble() == stock ? 0 : 1)} $unit'),
+                  );
                 },
-              );
-            },
-          );
-        },
+              ),
+            ),
+          ),
+        ],
       ),
     );
   }
