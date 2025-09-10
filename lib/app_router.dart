@@ -1,5 +1,5 @@
+// lib/router.dart
 import 'package:flutter/material.dart';
-import 'package:gerenciador_distribuidora/ui/pages/users_page.dart';
 import 'package:go_router/go_router.dart';
 
 import 'ui/shell.dart';
@@ -14,6 +14,10 @@ import 'ui/pages/inventory_count_page.dart';
 import 'ui/pages/reports_page.dart';
 import 'ui/pages/pdv_page.dart';
 import 'ui/pages/products/product_form_page.dart';
+
+// NOVOS
+import 'ui/pages/finance_report_page.dart';
+import 'ui/pages/stock_dashboard_page.dart';
 
 import 'domain/services/auth_service.dart';
 
@@ -32,18 +36,21 @@ GoRouter buildRouter() {
           GoRoute(path: '/estoque', builder: (_, __) => const StockPage()),
           GoRoute(path: '/pedidos', builder: (_, __) => const OrdersPage()),
           GoRoute(path: '/pdv', builder: (_, __) => const PdvPage()),
+          GoRoute(path: '/financeiro', builder: (_, __) => const FinanceReportPage()),          // NOVA
+          GoRoute(path: '/estoque_dashboard', builder: (_, __) => const StockDashboardPage()), // NOVA
           GoRoute(path: '/faturamento_sim', builder: (_, __) => const BillingSimPage()),
           GoRoute(path: '/inventario', builder: (_, __) => const InventoryCountPage()),
           GoRoute(path: '/relatorios', builder: (_, __) => const ReportsPage()),
-          GoRoute(path: '/usuarios', builder: (_, __) => const UsersPage()), // << NOVA
           GoRoute(path: '/produtos/novo', builder: (_, __) => const ProductFormPage()),
-          GoRoute(path: '/produtos/editar/:id', builder: (context, state) => ProductFormPage(productId: state.pathParameters['id'])),
+          GoRoute(
+            path: '/produtos/editar/:id',
+            builder: (context, state) => ProductFormPage(productId: state.pathParameters['id']),
+          ),
         ],
       ),
     ],
-    // >>> CORREÇÃO AQUI: use state.uri.path ao invés de state.subloc
     redirect: (context, state) async {
-      final location = state.uri.path; // ex.: '/login'
+      final location = state.uri.path;
       final loggingIn = location == '/login';
 
       final user = await auth.currentUser();

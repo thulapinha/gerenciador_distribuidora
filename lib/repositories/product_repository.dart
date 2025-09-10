@@ -7,7 +7,7 @@ import 'package:parse_server_sdk_flutter/parse_server_sdk_flutter.dart';
 ///
 /// Classe: Product
 /// Campos utilizados:
-/// - sku (String)
+/// - sku (String)          // código
 /// - name (String)
 /// - barcode (String?)
 /// - unit (String)
@@ -16,7 +16,7 @@ import 'package:parse_server_sdk_flutter/parse_server_sdk_flutter.dart';
 /// - category (String?)
 /// - ncm (String?)
 /// - brand (String?)
-/// - margin (Number?)        // margem em %
+/// - margin (Number?)      // margem em %
 /// - stock (Number)
 /// - minStock (Number)
 /// - maxStock (Number)
@@ -150,8 +150,9 @@ class ProductRepository {
     debugPrint('[ProductRepo] getBySku "$sku" includeInactive=$includeInactive');
     final q = QueryBuilder(ParseObject(className))..whereEqualTo('sku', sku);
     if (!includeInactive) q.whereEqualTo('active', true);
-    final ParseResponse r = (await q.first()) as ParseResponse;
-    debugPrint('[ProductRepo] getBySku resp success=${r.success} err=${r.error?.code}:${r.error?.message}');
+    final ParseResponse? r = (await q.first()) as ParseResponse?; // pode retornar null em alguns ambientes
+    debugPrint('[ProductRepo] getBySku resp success=${r?.success} err=${r?.error?.code}:${r?.error?.message}');
+    if (r == null) return null;
     if (!r.success && r.error?.code != 101) throw Exception(r.error?.message);
     return r.result as ParseObject?;
   }
@@ -161,10 +162,43 @@ class ProductRepository {
     debugPrint('[ProductRepo] getByBarcode "$barcode" includeInactive=$includeInactive');
     final q = QueryBuilder(ParseObject(className))..whereEqualTo('barcode', barcode);
     if (!includeInactive) q.whereEqualTo('active', true);
-    final ParseResponse r = (await q.first()) as ParseResponse;
-    debugPrint('[ProductRepo] getByBarcode resp success=${r.success} err=${r.error?.code}:${r.error?.message}');
+    final ParseResponse? r = (await q.first()) as ParseResponse?;
+    debugPrint('[ProductRepo] getByBarcode resp success=${r?.success} err=${r?.error?.code}:${r?.error?.message}');
+    if (r == null) return null;
     if (!r.success && r.error?.code != 101) throw Exception(r.error?.message);
     return r.result as ParseObject?;
+  }
+
+  /// Busca 1 produto por qualquer código: tenta SKU exato, depois BARRAS exato,
+  /// depois faz um "contains" por nome/sku/barras e retorna o primeiro.
+  Future<ParseObject?> findByAnyCode(String term, {bool includeInactive = false}) async {
+    final t = term.trim();
+    if (t.isEmpty) return null;
+
+    // 1) SKU exato
+    final bySku = await getBySku(t, includeInactive: includeInactive);
+    if (bySku != null) return bySku;
+
+    // 2) Barras exato
+    final byBar = await getByBarcode(t, includeInactive: includeInactive);
+    if (byBar != null) return byBar;
+
+    // 3) Fallback: contains (name/sku/barcode)
+    final qName  = QueryBuilder(ParseObject(className))..whereContains('name', t, caseSensitive: false);
+    final qSku   = QueryBuilder(ParseObject(className))..whereContains('sku', t, caseSensitive: false);
+    final qBar   = QueryBuilder(ParseObject(className))..whereContains('barcode', t, caseSensitive: false);
+
+    final root = ParseObject(className);
+    final query = QueryBuilder.or(root, [qName, qSku, qBar])
+      ..orderByAscending('name')
+      ..setLimit(1);
+    if (!includeInactive) query.whereEqualTo('active', true);
+
+    final ParseResponse resp = await query.query();
+    debugPrint('[ProductRepo] findByAnyCode("$t") resp success=${resp.success} count=${(resp.results ?? []).length} err=${resp.error?.message}');
+    if (!resp.success) throw Exception(resp.error?.message ?? 'Erro na busca');
+    if ((resp.results ?? []).isEmpty) return null;
+    return resp.results!.first as ParseObject;
   }
 
   /// Verifica se já existe outro produto com o mesmo SKU.
@@ -239,10 +273,10 @@ class ProductRepository {
     debugPrint('[ProductRepo] search term="$t" limit=$limit includeInactive=$includeInactive');
     if (t.isEmpty) return [];
 
-    final qName  = QueryBuilder(ParseObject(className))..whereContains('name', t);
-    final qSku   = QueryBuilder(ParseObject(className))..whereContains('sku', t);
-    final qBar   = QueryBuilder(ParseObject(className))..whereContains('barcode', t);
-    final qBrand = QueryBuilder(ParseObject(className))..whereContains('brand', t);
+    final qName  = QueryBuilder(ParseObject(className))..whereContains('name', t, caseSensitive: false);
+    final qSku   = QueryBuilder(ParseObject(className))..whereContains('sku', t, caseSensitive: false);
+    final qBar   = QueryBuilder(ParseObject(className))..whereContains('barcode', t, caseSensitive: false);
+    final qBrand = QueryBuilder(ParseObject(className))..whereContains('brand', t, caseSensitive: false);
 
     final root = ParseObject(className);
     final query = QueryBuilder.or(root, [qName, qSku, qBar, qBrand])
