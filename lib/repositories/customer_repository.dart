@@ -1,42 +1,90 @@
-// lib/repositories/customer_repository.dart
 import 'package:parse_server_sdk_flutter/parse_server_sdk_flutter.dart';
 
 class CustomerRepository {
-  static const _className = 'Customer';
+  static const _class = 'Customer';
 
-  Future<ParseObject> upsert({
-    String? objectId,
-    required String name,
-    String? cpf, // para NF Sim
-    String? phone,
-    String? email,
-    String? address,
+  QueryBuilder<ParseObject> _baseQuery({bool? onlyActive}) {
+    final q = QueryBuilder<ParseObject>(ParseObject(_class));
+    q.orderByAscending('name');
+    if (onlyActive == true) q.whereEqualTo('active', true);
+    return q;
+  }
+
+  Future<List<ParseObject>> search({
+    String q = '',
+    int limit = 50,
+    int skip = 0,
+    bool onlyActive = true,
   }) async {
-    final o = ParseObject(_className);
-    if (objectId != null) o.objectId = objectId;
-    o
-      ..set<String>('name', name)
-      ..set<String?>('cpf', cpf)
-      ..set<String?>('phone', phone)
-      ..set<String?>('email', email)
-      ..set<String?>('address', address);
-    final r = await o.save();
-    if (!r.success) throw Exception(r.error?.message);
-    return o;
+    final query = _baseQuery(onlyActive: onlyActive)..setLimit(limit)..setAmountToSkip(skip);
+
+    if (q.trim().isNotEmpty) {
+      final term = q.trim();
+      // Busca por name / cpfCnpj / phone / email (OR)
+      final ors = [
+        QueryBuilder<ParseObject>(ParseObject(_class))..whereContains('name', term, caseSensitive: false),
+        QueryBuilder<ParseObject>(ParseObject(_class))..whereContains('cpfCnpj', term, caseSensitive: false),
+        QueryBuilder<ParseObject>(ParseObject(_class))..whereContains('phone', term, caseSensitive: false),
+        QueryBuilder<ParseObject>(ParseObject(_class))..whereContains('email', term, caseSensitive: false),
+      ];
+      final main = QueryBuilder.or(ParseObject(_class), ors);
+      if (onlyActive) main.whereEqualTo('active', true);
+      main.orderByAscending('name');
+      main.setLimit(limit);
+      main.setAmountToSkip(skip);
+      final r = await main.query();
+      if (!r.success || r.results == null) return [];
+      return List<ParseObject>.from(r.results!);
+    }
+
+    final res = await query.query();
+    if (!res.success || res.results == null) return [];
+    return List<ParseObject>.from(res.results!);
   }
 
-  Future<List<ParseObject>> list({int limit = 200}) async {
-    final q = QueryBuilder(ParseObject(_className))
-      ..orderByAscending('name')
-      ..setLimit(limit);
-    final r = await q.query();
-    if (!r.success) throw Exception(r.error?.message);
-    return (r.results ?? []).cast<ParseObject>();
+  Future<ParseObject?> getById(String id) async {
+    final res = await ParseObject(_class).getObject(id);
+    if (!res.success || res.result == null) return null;
+    return res.result as ParseObject;
   }
 
-  Future<void> delete(String id) async {
-    final o = ParseObject(_className)..objectId = id;
-    final r = await o.delete();
-    if (!r.success) throw Exception(r.error?.message);
+  /// Salva (cria/edita). Retorna objectId.
+  Future<String> save(Map<String, dynamic> data) async {
+    final obj = ParseObject(_class);
+    if (data['objectId'] != null) obj.objectId = data['objectId'] as String;
+
+    // Campos padrão
+    obj.set<String?>('name', data['name']);
+    obj.set<String?>('cpfCnpj', data['cpfCnpj']);
+    obj.set<String?>('phone', data['phone']);
+    obj.set<String?>('email', data['email']);
+    obj.set<String?>('zip', data['zip']);
+    obj.set<String?>('street', data['street']);
+    obj.set<String?>('number', data['number']);
+    obj.set<String?>('neighborhood', data['neighborhood']);
+    obj.set<String?>('city', data['city']);
+    obj.set<String?>('state', data['state']);
+    obj.set<bool>('active', data['active'] ?? true);
+    obj.set<num?>('creditLimit', data['creditLimit']);
+    obj.set<num?>('balance', data['balance']);
+    obj.set<String?>('notes', data['notes']);
+
+    final res = await obj.save();
+    if (!res.success || res.result == null) {
+      throw res.error?.message ?? 'Falha ao salvar cliente';
+    }
+    return (res.result as ParseObject).objectId!;
+  }
+
+  /// Exclusão lógica por padrão (active=false). Passe [hardDelete]=true para excluir do Parse.
+  Future<void> delete(String id, {bool hardDelete = false}) async {
+    if (hardDelete) {
+      final res = await ParseObject(_class).delete(id: id);
+      if (!res.success) throw res.error?.message ?? 'Falha ao excluir';
+      return;
+    }
+    final obj = ParseObject(_class)..objectId = id..set<bool>('active', false);
+    final res = await obj.save();
+    if (!res.success) throw res.error?.message ?? 'Falha ao inativar';
   }
 }

@@ -19,8 +19,8 @@ enum _PayMethod {
   giftCard, // F8
   fuelVoucher, // F9
   other, // F10
-  pix, // key P
-  mercadoPago, // key M
+  pix, // P
+  mercadoPago, // M
 }
 
 class PdvPage extends StatefulWidget {
@@ -35,7 +35,7 @@ class _PdvPageState extends State<PdvPage> {
   final FocusNode _focusNode = FocusNode();
   final _repo = ProductRepository();
 
-  // Busca/código
+  // Busca
   final TextEditingController _codeCtl = TextEditingController();
 
   // Desconto e recebido
@@ -54,8 +54,8 @@ class _PdvPageState extends State<PdvPage> {
   String _priceTier = 'Preço Padrão';
 
   // ===== Helpers base ========================================================
-  String _money(num v) => 'R\$ ' + v.toStringAsFixed(2).replaceAll('.', ',');
-  String _fmtQty(num v) => v.truncateToDouble() == v ? v.toStringAsFixed(0) : v.toStringAsFixed(2);
+  String _money(num v) => 'R\$ ${v.toStringAsFixed(2).replaceAll('.', ',')}';
+  String _fmtQty(double v) => v.truncateToDouble() == v ? v.toStringAsFixed(0) : v.toStringAsFixed(2);
 
   // Parser robusto (BR/US): "1.234,56" => 1234.56; "1,50" => 1.50
   double _parseDecimal(String input) {
@@ -101,7 +101,7 @@ class _PdvPageState extends State<PdvPage> {
 
     final close = _showBlockingOverlay(context, 'Buscando produto...');
     try {
-      final p = await _repo.findByAnyCode(term).timeout(const Duration(seconds: 10));
+      final p = await _repo.findByAnyCode(term).timeout(const Duration(seconds: 12));
       if (p == null) {
         _snack('Produto não encontrado.');
         return;
@@ -121,6 +121,7 @@ class _PdvPageState extends State<PdvPage> {
     final name = p.get<String>('name') ?? 'Produto';
     final price = (p.get<num>('price') ?? 0).toDouble();
     final id = p.objectId!;
+    final imageUrl = p.get<ParseFileBase>('image')?.url;
 
     setState(() {
       // se já existe, só soma 1
@@ -129,7 +130,13 @@ class _PdvPageState extends State<PdvPage> {
         _items[idx].qty += 1;
         _selectedIndex = idx;
       } else {
-        _items.add(_PdvItem(productId: id, name: name, qty: 1, unitPrice: price));
+        _items.add(_PdvItem(
+          productId: id,
+          name: name,
+          qty: 1,
+          unitPrice: price,
+          imageUrl: imageUrl,
+        ));
         _selectedIndex = _items.length - 1;
       }
     });
@@ -147,8 +154,13 @@ class _PdvPageState extends State<PdvPage> {
         builder: (dctx, setDState) {
           Future<void> doSearchLocal() async {
             setDState(() => loading = true);
-            results = await _repo.searchProducts(termCtl.text.trim(), limit: 40);
-            setDState(() => loading = false);
+            try {
+              results = await _repo.searchProducts(termCtl.text.trim(), limit: 40);
+            } catch (_) {
+              results = [];
+            } finally {
+              setDState(() => loading = false);
+            }
           }
 
           return AlertDialog(
@@ -180,9 +192,23 @@ class _PdvPageState extends State<PdvPage> {
                         final p = results[i];
                         final name = p.get<String>('name') ?? '';
                         final price = (p.get<num>('price') ?? 0).toDouble();
-                        final sku = p.get<String>('sku') ?? p.get<String>('barcode') ?? '';
-
+                        final sku = p.get<String>('sku') ??
+                            p.get<String>('barcode') ??
+                            p.get<String>('code') ??
+                            '';
+                        final imageUrl = p.get<ParseFileBase>('image')?.url;
                         return ListTile(
+                          leading: ClipRRect(
+                            borderRadius: BorderRadius.circular(6),
+                            child: imageUrl == null
+                                ? Container(
+                              width: 40,
+                              height: 40,
+                              color: Colors.black12,
+                              child: const Icon(Icons.inventory_2, size: 22),
+                            )
+                                : Image.network(imageUrl, width: 40, height: 40, fit: BoxFit.cover),
+                          ),
                           title: Text(name),
                           subtitle: Text('SKU: $sku'),
                           trailing: Text(_money(price)),
@@ -381,10 +407,11 @@ class _PdvPageState extends State<PdvPage> {
         'discount': _discount,
         'paymentMethod': _methodString(_selectedMethod!),
         'received': _received,
-      }).timeout(const Duration(seconds: 20));
+      }).timeout(const Duration(seconds: 25));
 
       if (!mounted) return;
       if (resp.success) {
+        close(); // fecha overlay antes do diálogo
         await showDialog<void>(
           context: context,
           useRootNavigator: true,
@@ -409,10 +436,10 @@ class _PdvPageState extends State<PdvPage> {
       }
     } on TimeoutException {
       _snack('Tempo esgotado ao finalizar. Verifique a conexão.');
-    } catch (e) {
-      _snack('Erro: $e');
-    } finally {
       close();
+    } catch (e) {
+      close();
+      _snack('Erro: $e');
     }
   }
 
@@ -567,29 +594,22 @@ class _PdvPageState extends State<PdvPage> {
               ),
               const SizedBox(height: 8),
               Expanded(
-                  child: _ItemsTable(
-                    items: _items,
-                    selectedIndex: _selectedIndex,
-                    onSelect: (i) {
-                      setState(() => _selectedIndex = i);
-                    },
-                    onInc: (i) {
-                      setState(() => _items[i].qty += 1);
-                    },
-                    onDec: (i) {
-                      setState(() {
-                        _items[i].qty = math.max(0.0, _items[i].qty - 1);
-                      });
-                    },
-                    onEditQty: _editQty,
-                    onEditUnit: _editUnit,
-                    onRemove: (i) {
-                      setState(() {
-                        _items.removeAt(i);
-                        if (_selectedIndex == i) _selectedIndex = null;
-                      });
-                    },
-                  )),
+                child: _ItemsTable(
+                  items: _items,
+                  selectedIndex: _selectedIndex,
+                  onSelect: (i) => setState(() => _selectedIndex = i),
+                  onInc: (i) => setState(() => _items[i].qty += 1),
+                  onDec: (i) => setState(() => _items[i].qty = math.max(0.0, _items[i].qty - 1)),
+                  onEditQty: _editQty,
+                  onEditUnit: _editUnit,
+                  onRemove: (i) {
+                    setState(() {
+                      _items.removeAt(i);
+                      if (_selectedIndex == i) _selectedIndex = null;
+                    });
+                  },
+                ),
+              ),
               const SizedBox(height: 8),
               _FooterItems(
                 itemsCount: _items.length,
@@ -650,7 +670,7 @@ class _Header extends StatelessWidget {
       ),
       child: Column(
         children: [
-          Text('$_Header', style: const TextStyle(fontSize: 0)), // evita warning em release
+          Text('$_Header', style: const TextStyle(fontSize: 0)), // evita warning
           const SizedBox(height: 4),
           const Text('Preço Padrão', style: TextStyle(color: Colors.white, fontWeight: FontWeight.w600)),
           const SizedBox(height: 10),
@@ -743,7 +763,8 @@ class _ItemsTable extends StatelessWidget {
   final ValueChanged<int> onEditUnit;
   final ValueChanged<int> onRemove;
 
-  String _money(num v) => 'R\$ ' + v.toStringAsFixed(2).replaceAll('.', ',');
+  String _money(num v) => 'R\$ ${v.toStringAsFixed(2).replaceAll('.', ',')}';
+  String _fmtQty(double v) => v.truncateToDouble() == v ? v.toStringAsFixed(0) : v.toStringAsFixed(2);
 
   @override
   Widget build(BuildContext context) {
@@ -794,7 +815,28 @@ class _ItemsTable extends StatelessWidget {
                       child: Row(
                         children: [
                           _HCell(width: 64, child: Text('${i + 1}')),
-                          _HCell(flex: 3, child: Text(it.name, maxLines: 1, overflow: TextOverflow.ellipsis)),
+                          _HCell(
+                            flex: 3,
+                            child: Row(
+                              children: [
+                                ClipRRect(
+                                  borderRadius: BorderRadius.circular(6),
+                                  child: it.imageUrl != null
+                                      ? Image.network(it.imageUrl!, width: 36, height: 36, fit: BoxFit.cover)
+                                      : Container(
+                                    width: 36,
+                                    height: 36,
+                                    color: Colors.black12,
+                                    child: const Icon(Icons.inventory_2, size: 20),
+                                  ),
+                                ),
+                                const SizedBox(width: 8),
+                                Expanded(
+                                  child: Text(it.name, maxLines: 1, overflow: TextOverflow.ellipsis),
+                                ),
+                              ],
+                            ),
+                          ),
                           _HCell(
                             flex: 2,
                             child: Row(
@@ -808,9 +850,7 @@ class _ItemsTable extends StatelessWidget {
                                       border: Border.all(color: Theme.of(context).dividerColor),
                                       borderRadius: BorderRadius.circular(8),
                                     ),
-                                    child: Text(it.qty.truncateToDouble() == it.qty
-                                        ? it.qty.toStringAsFixed(0)
-                                        : it.qty.toStringAsFixed(2)),
+                                    child: Text(_fmtQty(it.qty)),
                                   ),
                                 ),
                                 IconButton(onPressed: () => onInc(i), icon: const Icon(Icons.add_circle_outline)),
@@ -824,7 +864,10 @@ class _ItemsTable extends StatelessWidget {
                               child: Align(alignment: Alignment.centerLeft, child: Text(_money(it.unitPrice))),
                             ),
                           ),
-                          _HCell(flex: 2, child: Text(_money(it.qty * it.unitPrice), style: const TextStyle(fontWeight: FontWeight.w600))),
+                          _HCell(
+                            flex: 2,
+                            child: Text(_money(it.qty * it.unitPrice), style: const TextStyle(fontWeight: FontWeight.w600)),
+                          ),
                           _HCell(width: 56, child: IconButton(onPressed: () => onRemove(i), icon: const Icon(Icons.delete_outline))),
                         ],
                       ),
@@ -871,7 +914,7 @@ class _FooterItems extends StatelessWidget {
   final VoidCallback onDiscount;
   final VoidCallback onProceed;
 
-  String _money(num v) => 'R\$ ' + v.toStringAsFixed(2).replaceAll('.', ',');
+  String _money(num v) => 'R\$ ${v.toStringAsFixed(2).replaceAll('.', ',')}';
 
   @override
   Widget build(BuildContext context) {
@@ -966,7 +1009,7 @@ class _KbdHint extends StatelessWidget {
   }
 }
 
-// ===== Payment grid (estilo roxo) ===========================================
+// ===== Payment grid ==========================================================
 class _PaymentGrid extends StatelessWidget {
   const _PaymentGrid({required this.onSelect});
   final ValueChanged<_PayMethod> onSelect;
@@ -1057,7 +1100,7 @@ class _FinishForm extends StatelessWidget {
   final VoidCallback onFinalize;
   final VoidCallback onBack;
 
-  String _money(num v) => 'R\$ ' + v.toStringAsFixed(2).replaceAll('.', ',');
+  String _money(num v) => 'R\$ ${v.toStringAsFixed(2).replaceAll('.', ',')}';
 
   @override
   Widget build(BuildContext context) {
@@ -1178,11 +1221,18 @@ class _FinishCard extends StatelessWidget {
 
 // ===== Model ================================================================
 class _PdvItem {
-  _PdvItem({required this.productId, required this.name, required this.qty, required this.unitPrice});
+  _PdvItem({
+    required this.productId,
+    required this.name,
+    required this.qty,
+    required this.unitPrice,
+    this.imageUrl,
+  });
   String? productId;
   String name;
   double qty;
   double unitPrice;
+  String? imageUrl;
 }
 
 // ===== Overlay progress (não trava) =========================================
@@ -1211,7 +1261,7 @@ VoidCallback _showBlockingOverlay(BuildContext context, String message) {
 
   overlay.insert(entry);
 
-  final timer = Timer(const Duration(seconds: 20), () {
+  final timer = Timer(const Duration(seconds: 25), () {
     if (!removed) {
       entry.remove();
       removed = true;

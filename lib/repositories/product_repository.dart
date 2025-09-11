@@ -89,51 +89,58 @@ class ProductRepository {
   // ---------------------------------------------------------------------------
 
   /// Cria/atualiza produto.
-  Future<ParseObject> upsertProduct({
+  // dentro de ProductRepository
+  Future<void> upsertProduct({
     String? objectId,
     required String sku,
     required String name,
     String? barcode,
-    String unit = 'UN',
-    double price = 0,
-    double cost = 0,
+    required String unit,
+    required double price,
+    required double cost,
     String? category,
     String? ncm,
     String? brand,
-    double? margin, // %
-    double stock = 0,
-    double minStock = 0,
-    double maxStock = 0,
-    bool active = true,
+    required double margin,
+    required double stock,
+    required double minStock,
+    required double maxStock,
     ParseFileBase? imageFile,
+    required bool active,
+    int? packQty,           // NOVOS
+    double? packPrice,      // NOVOS
   }) async {
-    debugPrint('[ProductRepo] upsert sku=$sku name=$name id=$objectId');
-    final obj = _toParseObject(
-      objectId: objectId,
-      sku: sku,
-      name: name,
-      barcode: barcode,
-      unit: unit,
-      price: price,
-      cost: cost,
-      category: category,
-      ncm: ncm,
-      brand: brand,
-      margin: margin,
-      stock: stock,
-      minStock: minStock,
-      maxStock: maxStock,
-      active: active,
-      imageFile: imageFile,
-    );
+    final o = ParseObject('Product');
+    if (objectId != null) o.objectId = objectId;
+    o
+      ..set<String>('sku', sku)
+      ..set<String>('name', name)
+      ..set<String?>('barcode', barcode)
+      ..set<String>('unit', unit)
+      ..set<num>('price', price)
+      ..set<num>('cost', cost)
+      ..set<String?>('category', category)
+      ..set<String?>('ncm', ncm)
+      ..set<String?>('brand', brand)
+      ..set<num>('margin', margin)
+      ..set<num>('stock', stock)
+      ..set<num>('minStock', minStock)
+      ..set<num>('maxStock', maxStock)
+      ..set<bool>('active', active);
 
-    final ParseResponse resp = await obj.save();
-    debugPrint('[ProductRepo] upsert resp success=${resp.success} err=${resp.error?.code}:${resp.error?.message}');
-    if (!resp.success) {
-      throw Exception('Erro ao salvar produto: ${resp.error?.message}');
+    if (packQty != null) o.set<num>('packQty', packQty);
+    if (packPrice != null) o.set<num>('packPrice', packPrice);
+
+    if (imageFile != null) {
+      await imageFile.save();
+      o.set<ParseFileBase>('image', imageFile);
     }
-    return obj;
+    final res = await o.save();
+    if (!res.success) {
+      throw Exception(res.error?.message ?? 'Falha ao salvar produto');
+    }
   }
+
 
   /// Busca produto por ID.
   Future<ParseObject?> getById(String objectId) async {

@@ -54,6 +54,7 @@ class MyApp extends StatelessWidget {
           useMaterial3: true,
           colorSchemeSeed: Colors.teal,
         ),
+        debugShowCheckedModeBanner: false,
         routerConfig: _router,
       ),
     );
