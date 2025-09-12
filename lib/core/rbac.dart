@@ -10,16 +10,24 @@ class Roles {
 
 class Pages {
   // chaves devem bater com as do backend (Parse Cloud)
+
+  // existentes
   static const pdv = 'pdv';
   static const customers = 'customers';
   static const products = 'products';
-  static const stock = 'stock';
+  static const stock = 'stock';            // dashboard de estoque
   static const inventory = 'inventory';
   static const orders = 'orders';
   static const finance = 'finance';
   static const reports = 'reports';
   static const adminUsers = 'adminUsers';
   static const settings = 'settings';
+
+  // NOVAS chaves usadas nas rotas/menus adicionados
+  static const billingSim = 'billingSim';          // /billing-sim (Simulador de Cobrança)
+  static const inventoryCount = 'inventoryCount';  // /inventory-count (Contagem de Inventário)
+  static const stockPage = 'stockPage';            // /stock (itens/gestão de estoque)
+  static const users = 'users';                    // /users (lista/gestão de usuários)
 }
 
 class Caps {
