@@ -33,7 +33,7 @@ void main() async {
   };
 
   await runZonedGuarded<Future<void>>(() async {
-    await initParse();
+    await initParse(); // mantém seu inicializador atual
     runApp(const MyApp());
   }, (error, stack) {
     debugPrint('UNCAUGHT: $error\n$stack');
@@ -43,13 +43,14 @@ void main() async {
 class MyApp extends StatelessWidget {
   const MyApp({super.key});
 
+  // Agora buildRouter() existe em app_router.dart
   static final GoRouter _router = buildRouter();
 
   @override
   Widget build(BuildContext context) {
     return AppProviders(
       child: MaterialApp.router(
-        title: 'Gerenciador Distribuidora',
+        title: 'RBC SERVIÇOS-Gerenciador Distribuidora',
         theme: ThemeData(
           useMaterial3: true,
           colorSchemeSeed: Colors.teal,

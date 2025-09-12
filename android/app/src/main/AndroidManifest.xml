@@ -1,6 +1,6 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <application
-        android:label="gerenciador_distribuidora"
+        android:label="RBC SERVIÇO-GERENCIADOR"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher">
         <activity

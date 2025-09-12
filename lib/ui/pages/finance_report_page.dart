@@ -1,304 +1,430 @@
-// lib/ui/pages/finance_report_page.dart
-import 'dart:async';
-import 'dart:math' as math;
-import 'package:flutter/material.dart';
-import 'package:parse_server_sdk_flutter/parse_server_sdk_flutter.dart';
+import 'dart:io';
 
-import '../../repositories/sale_repository.dart';
+import 'package:flutter/material.dart';
+import 'package:intl/intl.dart';
+import 'package:parse_server_sdk_flutter/parse_server_sdk_flutter.dart';
+import 'package:path_provider/path_provider.dart';
+
+import '../../core/session.dart';
+import '../../core/rbac.dart';
+import '../../core/csv_export.dart';
 
 class FinanceReportPage extends StatefulWidget {
   const FinanceReportPage({super.key});
-  static const route = '/financeiro';
 
   @override
   State<FinanceReportPage> createState() => _FinanceReportPageState();
 }
 
 class _FinanceReportPageState extends State<FinanceReportPage> {
-  final _repo = SalesRepository();
+  DateTime _start = DateTime.now().subtract(const Duration(days: 7));
+  DateTime _end = DateTime.now();
+  String _paymentFilter = 'ALL';
+  bool _loading = false;
+  List<SaleRow> _rows = [];
 
-  bool _loading = true;
-  List<ParseObject> _sales = [];
-  FinanceTotals? _totals;
+  // Agregados
+  int get count => _rows.length;
+  double get subtotalSum => _rows.fold(0, (p, e) => p + e.subtotal);
+  double get discountSum => _rows.fold(0, (p, e) => p + e.discount);
+  double get totalSum => _rows.fold(0, (p, e) => p + e.total);
+  double get receivedSum => _rows.fold(0, (p, e) => p + e.received);
+  double get changeSum => _rows.fold(0, (p, e) => p + e.change);
 
-  // Filtros
-  late DateTime _from; // 00:00:00 local
-  late DateTime _to;   // 23:59:59 local
-  final Set<String> _methods = {}; // vazio = todos
-  final _available = const [
-    'CASH', 'PIX', 'CARD_CREDIT', 'CARD_DEBIT',
-    'CHECK', 'STORE_CREDIT', 'FOOD_VOUCHER', 'MEAL_VOUCHER',
-    'GIFT_CARD', 'FUEL_VOUCHER', 'OTHER', 'MERCADO_PAGO'
-  ];
+  Map<String, double> get byPayment => _rows.fold(<String, double>{}, (map, e) {
+    map[e.paymentMethod] = (map[e.paymentMethod] ?? 0) + e.total;
+    return map;
+  });
+
+  final _fmt = NumberFormat.simpleCurrency(locale: 'pt_BR');
+  final _dateFmt = DateFormat('dd/MM/yyyy HH:mm');
 
   @override
   void initState() {
     super.initState();
-    final now = DateTime.now();
-    _from = DateTime(now.year, now.month, now.day);
-    _to = _from.add(const Duration(days: 1)).subtract(const Duration(milliseconds: 1));
-    _load();
+    _fetch();
   }
 
-  Future<void> _load() async {
-    setState(() => _loading = true);
-    try {
-      final list = await _repo.listSales(
-        start: _from,
-        end: _to,
-        paymentMethods: _methods.isEmpty ? null : _methods.toList(),
+  Future<void> _pickStart() async {
+    final d = await showDatePicker(
+      context: context,
+      firstDate: DateTime(2022, 1, 1),
+      lastDate: DateTime.now().add(const Duration(days: 365)),
+      initialDate: _start,
+    );
+    if (d != null) {
+      setState(() => _start = DateTime(d.year, d.month, d.day));
+    }
+  }
+
+  Future<void> _pickEnd() async {
+    final d = await showDatePicker(
+      context: context,
+      firstDate: DateTime(2022, 1, 1),
+      lastDate: DateTime.now().add(const Duration(days: 365)),
+      initialDate: _end,
+    );
+    if (d != null) {
+      // fim do dia
+      setState(() => _end = DateTime(d.year, d.month, d.day, 23, 59, 59));
+    }
+  }
+
+  Future<void> _fetch() async {
+    if (!Session.i.can(Caps.financeRead)) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Sem permissão: finance.read')),
       );
-      final totals = _repo.computeTotals(list);
-      if (!mounted) return;
-      setState(() {
-        _sales = list;
-        _totals = totals;
-      });
+      return;
+    }
+    setState(() => _loading = true);
+
+    try {
+      final q = QueryBuilder<ParseObject>(ParseObject('Sale'))
+        ..whereGreaterThanOrEqualsTo('createdAt', _start)
+        ..whereLessThanOrEqualTo('createdAt', _end)
+        ..whereEqualTo('status', 'DONE')
+        ..orderByAscending('createdAt')
+        ..setLimit(1000);
+
+      if (_paymentFilter != 'ALL') {
+        q.whereEqualTo('paymentMethod', _paymentFilter);
+      }
+
+      final res = await q.query();
+      if (res.success && res.results != null) {
+        final list = res.results!.cast<ParseObject>();
+        _rows = list.map((o) => SaleRow.fromParse(o)).toList();
+      } else {
+        _rows = [];
+      }
     } catch (e) {
-      if (mounted) _snack('Erro ao carregar: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Erro ao buscar: $e')));
+      }
     } finally {
       if (mounted) setState(() => _loading = false);
     }
   }
 
-  Future<void> _pickRange() async {
-    final picked = await showDateRangePicker(
-      context: context,
-      firstDate: DateTime(2020, 1, 1),
-      lastDate: DateTime.now().add(const Duration(days: 365)),
-      initialDateRange: DateTimeRange(start: _from, end: _to),
-      helpText: 'Período do relatório',
-      saveText: 'Aplicar',
-    );
-    if (picked != null) {
-      final start = DateTime(picked.start.year, picked.start.month, picked.start.day);
-      final end = DateTime(picked.end.year, picked.end.month, picked.end.day, 23, 59, 59, 999);
-      setState(() {
-        _from = start;
-        _to = end;
-      });
-      _load();
+  Future<void> _exportCsv() async {
+    try {
+      final dir = await getApplicationDocumentsDirectory();
+      final rows = <List<dynamic>>[];
+      rows.add([
+        'Data',
+        'Número',
+        'Cliente CPF',
+        'Subtotal',
+        'Desconto',
+        'Total',
+        'Recebido',
+        'Troco',
+        'Pagamento',
+        'CriadoPor',
+        'PapelCriador'
+      ]);
+
+      for (final r in _rows) {
+        rows.add([
+          _dateFmt.format(r.createdAt),
+          r.number ?? '',
+          r.customerCpf ?? '',
+          r.subtotal,
+          r.discount,
+          r.total,
+          r.received,
+          r.change,
+          r.paymentMethod,
+          r.createdBy ?? '',
+          r.createdByRole ?? '',
+        ]);
+      }
+
+      final file = await saveCsv(
+        'finance_${DateFormat('yyyyMMdd_HHmm').format(DateTime.now())}.csv',
+        rows,
+        dir,
+      );
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('CSV salvo em: ${file.path}')),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Falha ao exportar CSV: $e')));
     }
   }
 
-  String _money(num v) => 'R\$ ' + v.toStringAsFixed(2).replaceAll('.', ',');
-
   @override
   Widget build(BuildContext context) {
-    final cs = Theme.of(context).colorScheme;
+    if (!Session.i.can(Caps.financeRead)) {
+      return const Center(child: Text('Acesso negado'));
+    }
 
-    final header = Container(
-      width: double.infinity,
-      padding: const EdgeInsets.fromLTRB(24, 18, 24, 16),
-      decoration: BoxDecoration(
-        gradient: LinearGradient(colors: [cs.primary, cs.primaryContainer], begin: Alignment.topLeft, end: Alignment.bottomRight),
-      ),
+    return Padding(
+      padding: const EdgeInsets.all(16),
       child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const Text('Relatório Financeiro', style: TextStyle(color: Colors.white, fontSize: 22, fontWeight: FontWeight.w700)),
-          const SizedBox(height: 10),
-          Wrap(
-            spacing: 10,
-            runSpacing: 10,
-            crossAxisAlignment: WrapCrossAlignment.center,
-            children: [
-              FilledButton.icon(
-                onPressed: _pickRange,
-                icon: const Icon(Icons.calendar_month),
-                label: Text('${_fmtDate(_from)} — ${_fmtDate(_to)}'),
-                style: FilledButton.styleFrom(backgroundColor: Colors.white.withOpacity(.18)),
+          _Filters(
+            start: _start,
+            end: _end,
+            paymentFilter: _paymentFilter,
+            onPickStart: _pickStart,
+            onPickEnd: _pickEnd,
+            onPaymentChange: (v) => setState(() => _paymentFilter = v),
+            onSearch: _fetch,
+            onExport: _exportCsv,
+            busy: _loading,
+          ),
+          const SizedBox(height: 12),
+          _TotalsBar(
+            count: count,
+            subtotal: subtotalSum,
+            discount: discountSum,
+            total: totalSum,
+            received: receivedSum,
+            change: changeSum,
+            byPayment: byPayment,
+            currency: _fmt,
+          ),
+          const SizedBox(height: 12),
+          Expanded(
+            child: Card(
+              clipBehavior: Clip.antiAlias,
+              child: _loading
+                  ? const Center(child: CircularProgressIndicator())
+                  : _rows.isEmpty
+                  ? const Center(child: Text('Nenhuma venda encontrada no período.'))
+                  : _Table(
+                rows: _rows,
+                currency: _fmt,
+                dateFmt: _dateFmt,
               ),
-              Wrap(
-                spacing: 6,
-                children: [
-                  FilterChip(
-                    selected: _methods.isEmpty,
-                    label: const Text('Todos'),
-                    onSelected: (_) { setState(() => _methods.clear()); _load(); },
-                  ),
-                  for (final m in _available)
-                    FilterChip(
-                      selected: _methods.contains(m),
-                      label: Text(_label(m)),
-                      onSelected: (sel) { setState(() { sel ? _methods.add(m) : _methods.remove(m); }); _load(); },
-                    ),
-                ],
-              ),
-              const SizedBox(width: 8),
-              FilledButton.icon(
-                onPressed: _loading ? null : _load,
-                icon: const Icon(Icons.refresh),
-                label: const Text('Atualizar'),
-                style: FilledButton.styleFrom(backgroundColor: Colors.green.shade700),
-              ),
-            ],
+            ),
           ),
         ],
       ),
     );
-
-    final body = Expanded(
-      child: Padding(
-        padding: const EdgeInsets.all(16.0),
-        child: Column(
-          children: [
-            _SummaryRow(totals: _totals),
-            const SizedBox(height: 12),
-            Expanded(
-              child: Container(
-                decoration: BoxDecoration(borderRadius: BorderRadius.circular(12), border: Border.all(color: Theme.of(context).dividerColor)),
-                child: _loading
-                    ? const Center(child: CircularProgressIndicator())
-                    : _sales.isEmpty
-                    ? const Center(child: Text('Nenhuma venda no período.'))
-                    : Column(
-                  children: [
-                    Container(
-                      height: 48,
-                      padding: const EdgeInsets.symmetric(horizontal: 12),
-                      alignment: Alignment.centerLeft,
-                      decoration: BoxDecoration(
-                        color: Theme.of(context).colorScheme.surfaceVariant,
-                        borderRadius: const BorderRadius.vertical(top: Radius.circular(12)),
-                      ),
-                      child: const Text('Vendas do período', style: TextStyle(fontWeight: FontWeight.w600)),
-                    ),
-                    Expanded(
-                      child: ListView.separated(
-                        itemCount: _sales.length,
-                        separatorBuilder: (_, __) => Divider(height: 1, color: Theme.of(context).dividerColor),
-                        itemBuilder: (_, i) {
-                          final s = _sales[i];
-                          final created = (s.get<DateTime>('createdAt') ?? DateTime.now()).toLocal();
-                          final disc = (s.get<num>('discount') ?? 0).toDouble();
-                          final net = (s.get<num>('total') as num?)?.toDouble() ?? _repo.computeTotals([s]).net;
-                          final gross = disc + net;
-                          final rcv = (s.get<num>('received') ?? net).toDouble();
-                          final chg = math.max(0, rcv - net);
-                          final pm = (s.get<String>('paymentMethod') ?? 'UNKNOWN').toUpperCase();
-                          final oid = s.objectId ?? '-';
-
-                          return SizedBox(
-                            height: 56,
-                            child: Row(
-                              children: [
-                                _Cell(width: 120, child: Text(_fmtHour(created))),
-                                _Cell(width: 140, child: Text('#$oid')),
-                                _Cell(flex: 2, child: Text(_label(pm))),
-                                _Cell(width: 120, child: Text(_money(gross))),
-                                _Cell(width: 120, child: Text(_money(disc))),
-                                _Cell(width: 120, child: Text(_money(net), style: const TextStyle(fontWeight: FontWeight.w600))),
-                                _Cell(width: 120, child: Text(_money(rcv))),
-                                _Cell(width: 120, child: Text(_money(chg))),
-                              ],
-                            ),
-                          );
-                        },
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-
-    return Scaffold(body: Column(children: [header, body]));
   }
-
-  String _label(String m) {
-    switch (m) {
-      case 'CASH': return 'Dinheiro';
-      case 'PIX': return 'PIX';
-      case 'CARD_CREDIT': return 'Cartão Crédito';
-      case 'CARD_DEBIT': return 'Cartão Débito';
-      case 'CHECK': return 'Cheque';
-      case 'STORE_CREDIT': return 'Crédito Loja';
-      case 'FOOD_VOUCHER': return 'Vale Alimentação';
-      case 'MEAL_VOUCHER': return 'Vale Refeição';
-      case 'GIFT_CARD': return 'Vale Presente';
-      case 'FUEL_VOUCHER': return 'Vale Combustível';
-      case 'MERCADO_PAGO': return 'Mercado Pago';
-      default: return m;
-    }
-  }
-
-  String _fmtDate(DateTime d) =>
-      '${d.day.toString().padLeft(2, '0')}/${d.month.toString().padLeft(2, '0')}/${d.year}';
-  String _fmtHour(DateTime d) =>
-      '${d.hour.toString().padLeft(2, '0')}:${d.minute.toString().padLeft(2, '0')}';
-
-  void _snack(String m) => ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(m)));
 }
 
-class _SummaryRow extends StatelessWidget {
-  const _SummaryRow({required this.totals});
-  final FinanceTotals? totals;
+class _Filters extends StatelessWidget {
+  final DateTime start, end;
+  final String paymentFilter;
+  final VoidCallback onPickStart, onPickEnd, onSearch, onExport;
+  final ValueChanged<String> onPaymentChange;
+  final bool busy;
 
-  String _money(num v) => 'R\$ ' + v.toStringAsFixed(2).replaceAll('.', ',');
+  const _Filters({
+    required this.start,
+    required this.end,
+    required this.paymentFilter,
+    required this.onPickStart,
+    required this.onPickEnd,
+    required this.onPaymentChange,
+    required this.onSearch,
+    required this.onExport,
+    required this.busy,
+  });
 
   @override
   Widget build(BuildContext context) {
-    final t = totals;
+    final df = DateFormat('dd/MM/yyyy');
     return Row(
       children: [
-        Expanded(child: _SummaryCard(title: 'Faturado Bruto', value: _money(t?.gross ?? 0))),
-        const SizedBox(width: 10),
-        Expanded(child: _SummaryCard(title: 'Descontos', value: _money(t?.discount ?? 0))),
-        const SizedBox(width: 10),
-        Expanded(child: _SummaryCard(title: 'Faturado Líquido', value: _money(t?.net ?? 0), emphasized: true)),
-        const SizedBox(width: 10),
-        Expanded(child: _SummaryCard(title: 'Recebido', value: _money(t?.received ?? 0))),
-        const SizedBox(width: 10),
-        Expanded(child: _SummaryCard(title: 'Troco', value: _money(t?.change ?? 0))),
-        const SizedBox(width: 10),
-        Expanded(child: _SummaryCard(title: 'Nº de Vendas', value: '${t?.count ?? 0}')),
+        Flexible(
+          child: InputDecorator(
+            decoration: const InputDecoration(labelText: 'Início'),
+            child: InkWell(
+              onTap: busy ? null : onPickStart,
+              child: Padding(
+                padding: const EdgeInsets.symmetric(vertical: 8),
+                child: Text(df.format(start)),
+              ),
+            ),
+          ),
+        ),
+        const SizedBox(width: 8),
+        Flexible(
+          child: InputDecorator(
+            decoration: const InputDecoration(labelText: 'Fim'),
+            child: InkWell(
+              onTap: busy ? null : onPickEnd,
+              child: Padding(
+                padding: const EdgeInsets.symmetric(vertical: 8),
+                child: Text(df.format(end)),
+              ),
+            ),
+          ),
+        ),
+        const SizedBox(width: 8),
+        Flexible(
+          child: DropdownButtonFormField<String>(
+            value: paymentFilter,
+            decoration: const InputDecoration(labelText: 'Pagamento'),
+            items: const [
+              DropdownMenuItem(value: 'ALL', child: Text('Todos')),
+              DropdownMenuItem(value: 'CASH', child: Text('Dinheiro')),
+              DropdownMenuItem(value: 'CARD', child: Text('Cartão')),
+              DropdownMenuItem(value: 'PIX', child: Text('PIX')),
+              DropdownMenuItem(value: 'OTHER', child: Text('Outros')),
+            ],
+            onChanged: (v) => onPaymentChange(v ?? 'ALL'),
+          ),
+        ),
+        const SizedBox(width: 8),
+        FilledButton.icon(
+          onPressed: busy ? null : onSearch,
+          icon: const Icon(Icons.search),
+          label: const Text('Buscar'),
+        ),
+        const SizedBox(width: 8),
+        FilledButton.tonalIcon(
+          onPressed: busy ? null : onExport,
+          icon: const Icon(Icons.download),
+          label: const Text('Exportar CSV'),
+        ),
       ],
     );
   }
 }
 
-class _SummaryCard extends StatelessWidget {
-  const _SummaryCard({required this.title, required this.value, this.emphasized = false});
-  final String title;
-  final String value;
-  final bool emphasized;
+class _TotalsBar extends StatelessWidget {
+  final int count;
+  final double subtotal, discount, total, received, change;
+  final Map<String, double> byPayment;
+  final NumberFormat currency;
+
+  const _TotalsBar({
+    required this.count,
+    required this.subtotal,
+    required this.discount,
+    required this.total,
+    required this.received,
+    required this.change,
+    required this.byPayment,
+    required this.currency,
+  });
 
   @override
   Widget build(BuildContext context) {
-    final cs = Theme.of(context).colorScheme;
-    return Container(
-      padding: const EdgeInsets.all(14),
-      decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: emphasized ? cs.primary : Theme.of(context).dividerColor, width: emphasized ? 1.4 : 1),
-        color: emphasized ? cs.primaryContainer.withOpacity(.15) : null,
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(value, style: Theme.of(context).textTheme.titleLarge!.copyWith(fontWeight: FontWeight.w800)),
-          const SizedBox(height: 4),
-          Text(title, style: Theme.of(context).textTheme.labelLarge!.copyWith(color: cs.onSurfaceVariant)),
-        ],
+    Widget chip(String label, String value) => Chip(
+      label: Row(children: [Text(label), const SizedBox(width: 6), Text(value, style: const TextStyle(fontWeight: FontWeight.w600))]),
+    );
+
+    return Wrap(
+      spacing: 8,
+      runSpacing: 8,
+      children: [
+        chip('Vendas', '$count'),
+        chip('Subtotal', currency.format(subtotal)),
+        chip('Descontos', currency.format(discount)),
+        chip('Total', currency.format(total)),
+        chip('Recebido', currency.format(received)),
+        chip('Troco', currency.format(change)),
+        for (final e in byPayment.entries) chip('Pag. ${e.key}', currency.format(e.value)),
+      ],
+    );
+  }
+}
+
+class _Table extends StatelessWidget {
+  final List<SaleRow> rows;
+  final NumberFormat currency;
+  final DateFormat dateFmt;
+
+  const _Table({
+    required this.rows,
+    required this.currency,
+    required this.dateFmt,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Scrollbar(
+      child: SingleChildScrollView(
+        scrollDirection: Axis.horizontal,
+        child: DataTable(
+          columns: const [
+            DataColumn(label: Text('Data')),
+            DataColumn(label: Text('Número')),
+            DataColumn(label: Text('Cliente CPF')),
+            DataColumn(label: Text('Subtotal')),
+            DataColumn(label: Text('Desconto')),
+            DataColumn(label: Text('Total')),
+            DataColumn(label: Text('Recebido')),
+            DataColumn(label: Text('Troco')),
+            DataColumn(label: Text('Pagamento')),
+            DataColumn(label: Text('Criado por')),
+            DataColumn(label: Text('Papel')),
+          ],
+          rows: rows
+              .map(
+                (r) => DataRow(
+              cells: [
+                DataCell(Text(dateFmt.format(r.createdAt))),
+                DataCell(Text(r.number ?? '')),
+                DataCell(Text(r.customerCpf ?? '')),
+                DataCell(Text(currency.format(r.subtotal))),
+                DataCell(Text(currency.format(r.discount))),
+                DataCell(Text(currency.format(r.total))),
+                DataCell(Text(currency.format(r.received))),
+                DataCell(Text(currency.format(r.change))),
+                DataCell(Text(r.paymentMethod)),
+                DataCell(Text(r.createdBy ?? '')),
+                DataCell(Text(r.createdByRole ?? '')),
+              ],
+            ),
+          )
+              .toList(),
+        ),
       ),
     );
   }
 }
 
-class _Cell extends StatelessWidget {
-  const _Cell({this.flex, this.width, required this.child});
-  final int? flex;
-  final double? width;
-  final Widget child;
+class SaleRow {
+  final DateTime createdAt;
+  final String? number;
+  final String? customerCpf;
+  final double subtotal;
+  final double discount;
+  final double total;
+  final double received;
+  final double change;
+  final String paymentMethod;
+  final String? createdBy;
+  final String? createdByRole;
 
-  @override
-  Widget build(BuildContext context) {
-    final inner = Padding(padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8), child: Align(alignment: Alignment.centerLeft, child: child));
-    if (width != null) return SizedBox(width: width, child: inner);
-    return Expanded(flex: flex ?? 1, child: inner);
+  SaleRow({
+    required this.createdAt,
+    required this.number,
+    required this.customerCpf,
+    required this.subtotal,
+    required this.discount,
+    required this.total,
+    required this.received,
+    required this.change,
+    required this.paymentMethod,
+    required this.createdBy,
+    required this.createdByRole,
+  });
+
+  factory SaleRow.fromParse(ParseObject o) {
+    double nz(num? v) => (v == null) ? 0.0 : v.toDouble();
+    return SaleRow(
+      createdAt: o.createdAt ?? DateTime.now(),
+      number: o.get<String>('number'),
+      customerCpf: o.get<String>('customerCpf'),
+      subtotal: nz(o.get<num>('subtotal')),
+      discount: nz(o.get<num>('discount')),
+      total: nz(o.get<num>('total')),
+      received: nz(o.get<num>('received')),
+      change: nz(o.get<num>('change')),
+      paymentMethod: (o.get<String>('paymentMethod') ?? 'UNKNOWN').toUpperCase(),
+      createdBy: (o.get<ParseObject>('createdBy'))?.objectId,
+      createdByRole: o.get<String>('createdByRole'),
+    );
   }
 }

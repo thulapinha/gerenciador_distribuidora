@@ -1,83 +1,111 @@
+// lib/app_router.dart
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 
+import 'core/session.dart';
+import 'core/rbac.dart';
+
 import 'ui/shell.dart';
 import 'ui/pages/login_page.dart';
-
-// PRIMEIRA TELA (Dashboard de Estoque)
 import 'ui/pages/stock_dashboard_page.dart';
-
-// Demais telas
 import 'ui/pages/pdv_page.dart';
 import 'ui/pages/products_page.dart';
 import 'ui/pages/customers_page.dart';
-import 'ui/pages/stock_page.dart';
 import 'ui/pages/orders_page.dart';
-import 'ui/pages/finance_report_page.dart';
-import 'ui/pages/billing_sim_page.dart';
-import 'ui/pages/inventory_count_page.dart';
+import 'ui/pages/finance_report_page.dart'; // << mudou
 import 'ui/pages/reports_page.dart';
-import 'ui/pages/products/product_form_page.dart';
-
-import 'domain/services/auth_service.dart';
+import 'ui/pages/admin_users_page.dart';
+import 'ui/pages/settings_page.dart';
 
 GoRouter buildRouter() {
-  final auth = AuthService();
-
   return GoRouter(
+    debugLogDiagnostics: false,
+    initialLocation: '/login',
+    refreshListenable: Session.i, // reagir a login/logout e mudanças de perfil
     routes: [
-      GoRoute(path: '/login', builder: (_, __) => const LoginPage()),
-
+      GoRoute(
+        path: '/login',
+        name: 'login',
+        builder: (ctx, st) => const LoginPage(),
+      ),
       ShellRoute(
-        builder: (context, state, child) => ShellScaffold(child: child),
+        builder: (ctx, st, child) => ShellScaffold(child: child),
         routes: [
-          // HOME -> redireciona para o dashboard de estoque
           GoRoute(
             path: '/',
-            redirect: (_, __) => '/estoque_dashboard',
+            name: 'dashboard',
+            builder: (ctx, st) => const StockDashboardPage(),
           ),
-
-          // Dashboard de Estoque (primeira opção do menu)
           GoRoute(
-            path: '/estoque_dashboard',
-            builder: (_, __) => const StockDashboardPage(),
+            path: '/pdv',
+            name: 'pdv',
+            builder: (ctx, st) => const PdvPage(),
           ),
-
-          // Demais telas
-          GoRoute(path: '/pdv', builder: (_, __) => const PdvPage()),
-          GoRoute(path: '/produtos', builder: (_, __) => const ProductsPage()),
-          GoRoute(path: '/clientes', builder: (_, __) => const CustomersPage()),
-          GoRoute(path: '/estoque', builder: (_, __) => const StockPage()),
-          GoRoute(path: '/pedidos', builder: (_, __) => const OrdersPage()),
-          GoRoute(path: '/financeiro', builder: (_, __) => const FinanceReportPage()),
-          GoRoute(path: '/faturamento_sim', builder: (_, __) => const BillingSimPage()),
-          GoRoute(path: '/inventario', builder: (_, __) => const InventoryCountPage()),
-          GoRoute(path: '/relatorios', builder: (_, __) => const ReportsPage()),
-
-          // Produtos (cadastro)
-          GoRoute(path: '/produtos/novo', builder: (_, __) => const ProductFormPage()),
           GoRoute(
-            path: '/produtos/editar/:id',
-            builder: (context, state) =>
-                ProductFormPage(productId: state.pathParameters['id']),
+            path: '/products',
+            name: 'products',
+            builder: (ctx, st) => const ProductsPage(),
+          ),
+          GoRoute(
+            path: '/customers',
+            name: 'customers',
+            builder: (ctx, st) => const CustomersPage(),
+          ),
+          GoRoute(
+            path: '/orders',
+            name: 'orders',
+            builder: (ctx, st) => const OrdersPage(),
+          ),
+          GoRoute(
+            path: '/finance',
+            name: 'finance',
+            builder: (ctx, st) => const FinanceReportPage(), // << mudou
+          ),
+          GoRoute(
+            path: '/reports',
+            name: 'reports',
+            builder: (ctx, st) => const ReportsPage(),
+          ),
+          GoRoute(
+            path: '/admin-users',
+            name: 'adminUsers',
+            builder: (ctx, st) => const AdminUsersPage(),
+          ),
+          GoRoute(
+            path: '/settings',
+            name: 'settings',
+            builder: (ctx, st) => const SettingsPage(),
           ),
         ],
       ),
     ],
+    redirect: (ctx, state) {
+      final logged = Session.i.logged;
+      final isLogin = state.matchedLocation == '/login';
 
-    // Login e redirecionamento por papel
-    redirect: (context, state) async {
-      final location = state.uri.path;
-      final loggingIn = location == '/login';
+      if (!logged && !isLogin) return '/login';
+      if (logged && isLogin) return '/';
 
-      final user = await auth.currentUser();
-      if (user == null && !loggingIn) return '/login';
-      if (user != null && loggingIn) {
-        final isAdmin =
-            (user.get<String>('role') ?? 'cashier').toLowerCase() == 'admin';
-        // Admin começa no dashboard de estoque; caixa cai no PDV
-        return isAdmin ? '/estoque_dashboard' : '/pdv';
+      // Bloqueio por página (rota) conforme perfil
+      final loc = state.matchedLocation;
+      String? pageKey;
+      if (loc == '/pdv') pageKey = Pages.pdv;
+      if (loc == '/products') pageKey = Pages.products;
+      if (loc == '/customers') pageKey = Pages.customers;
+      if (loc == '/orders') pageKey = Pages.orders;
+      if (loc == '/finance') pageKey = Pages.finance;
+      if (loc == '/reports') pageKey = Pages.reports;
+      if (loc == '/admin-users') pageKey = Pages.adminUsers;
+      if (loc == '/settings') pageKey = Pages.settings;
+      if (loc == '/') pageKey = Pages.stock; // dashboard de estoque
+
+      if (pageKey != null && logged) {
+        if (!Session.i.show(pageKey)) {
+          // Sem permissão para a página: redireciona ao dashboard
+          return '/';
+        }
       }
+
       return null;
     },
   );
