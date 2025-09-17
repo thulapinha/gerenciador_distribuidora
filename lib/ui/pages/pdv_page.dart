@@ -28,6 +28,11 @@ enum _PayMethod {
   giftCard, fuelVoucher, other, pix, mercadoPago
 }
 
+// ===== Helpers GLOBAIS (disponíveis para as parts) ==========================
+/// Formata dinheiro no padrão brasileiro.
+/// (Função global para que `search_bar.dart` possa chamar sem erro.)
+String _money(num v) => 'R\$ ${v.toStringAsFixed(2).replaceAll('.', ',')}';
+
 // ===== PAGE =================================================================
 class PdvPage extends StatefulWidget {
   const PdvPage({super.key});
@@ -67,7 +72,6 @@ class _PdvPageState extends State<PdvPage> {
   Timer? _hb;
 
   // ===== Helpers =============================================================
-  String _money(num v) => 'R\$ ${v.toStringAsFixed(2).replaceAll('.', ',')}';
   String _fmtQty(double v) =>
       v.truncateToDouble() == v ? v.toStringAsFixed(0) : v.toStringAsFixed(2);
 
@@ -205,7 +209,7 @@ class _PdvPageState extends State<PdvPage> {
         _snack('Produto não encontrado.');
         return;
       }
-      _addProductParse(p);
+      _addProductParse(p); // padrão UN
       _codeCtl.clear();
     } on TimeoutException {
       _snack('Tempo esgotado na busca. Tente novamente.');
@@ -217,20 +221,40 @@ class _PdvPageState extends State<PdvPage> {
     }
   }
 
-  void _addProductParse(ParseObject p) {
-    final name = p.get<String>('name') ?? 'Produto';
-    final price = (p.get<num>('price') ?? 0).toDouble();
+  void _addProductParse(
+      ParseObject p, {
+        String uom = 'UN',
+        double? multiplier,
+        double? overridePrice,
+      }) {
+    final baseName = p.get<String>('name') ?? 'Produto';
     final id = p.objectId!;
     final imageUrl = p.get<ParseFileBase>('image')?.url;
 
+    final packQty = (p.get<num>('packQty') ?? p.get<num>('packSize') ?? 1).toDouble();
+    final isCx = uom.toUpperCase() == 'CX';
+    final mult = isCx ? (multiplier ?? (packQty <= 0 ? 1.0 : packQty)) : 1.0;
+
+    final priceUn = (p.get<num>('price') ?? 0).toDouble();
+    final priceCx = (p.get<num>('packPrice') ?? 0).toDouble();
+    final displayPrice = overridePrice ?? (isCx ? priceCx : priceUn);
+
+    final label = isCx ? '${baseName.toUpperCase()} cx' : '${baseName.toUpperCase()} un';
+
     setState(() {
-      final idx = _items.indexWhere((e) => e.productId == id);
+      final idx = _items.indexWhere((e) => e.productId == id && e.uom == uom.toUpperCase());
       if (idx >= 0) {
         _items[idx].qty += 1;
         _selectedIndex = idx;
       } else {
         _items.add(_PdvItem(
-          productId: id, name: name, qty: 1, unitPrice: price, imageUrl: imageUrl,
+          productId: id,
+          name: label,
+          qty: 1,
+          unitPrice: displayPrice,
+          imageUrl: imageUrl,
+          uom: uom.toUpperCase(),
+          multiplier: mult,
         ));
         _selectedIndex = _items.length - 1;
       }
@@ -284,29 +308,61 @@ class _PdvPageState extends State<PdvPage> {
                       separatorBuilder: (_, __) => const Divider(height: 1),
                       itemBuilder: (_, i) {
                         final p = results[i];
-                        final name = p.get<String>('name') ?? '';
-                        final price = (p.get<num>('price') ?? 0).toDouble();
+                        final name = (p.get<String>('name') ?? '').toUpperCase();
                         final sku = p.get<String>('sku') ??
                             p.get<String>('barcode') ??
-                            p.get<String>('code') ?? '';
+                            p.get<String>('code') ??
+                            '';
                         final imageUrl = p.get<ParseFileBase>('image')?.url;
-                        return ListTile(
-                          leading: ClipRRect(
-                            borderRadius: BorderRadius.circular(6),
-                            child: imageUrl == null
-                                ? Container(width: 40, height: 40, color: Colors.black12,
-                                child: const Icon(Icons.inventory_2, size: 22))
-                                : Image.network(imageUrl, width: 40, height: 40, fit: BoxFit.cover),
-                          ),
-                          title: Text(name),
+
+                        final priceUn = (p.get<num>('price') ?? 0).toDouble();
+                        final packPrice = (p.get<num>('packPrice') ?? 0).toDouble();
+                        final packQty = (p.get<num>('packQty') ?? 0).toDouble();
+
+                        final hasCx = packQty > 0 && packPrice > 0;
+
+                        Widget thumb() => ClipRRect(
+                          borderRadius: BorderRadius.circular(6),
+                          child: imageUrl == null
+                              ? Container(
+                            width: 40, height: 40, color: Colors.black12,
+                            child: const Icon(Icons.inventory_2, size: 22),
+                          )
+                              : Image.network(imageUrl, width: 40, height: 40, fit: BoxFit.cover),
+                        );
+
+                        final unTile = ListTile(
+                          leading: thumb(),
+                          title: Text('$name un'),
                           subtitle: Text('SKU: $sku'),
-                          trailing: Text(_money(price)),
+                          trailing: Text(_money(priceUn)),
                           onTap: () {
                             Navigator.of(dctx).pop();
-                            _addProductParse(p);
+                            _addProductParse(p, uom: 'UN', overridePrice: priceUn);
                             _refocus();
                           },
                         );
+
+                        final cxTile = hasCx
+                            ? ListTile(
+                          leading: thumb(),
+                          title: Text('$name cx'),
+                          subtitle: Text('CX com ${packQty.toStringAsFixed(packQty.truncateToDouble()==packQty?0:2)} un'),
+                          trailing: Text(_money(packPrice)),
+                          onTap: () {
+                            Navigator.of(dctx).pop();
+                            _addProductParse(
+                              p,
+                              uom: 'CX',
+                              multiplier: packQty,
+                              overridePrice: packPrice,
+                            );
+                            _refocus();
+                          },
+                        )
+                            : null;
+
+                        return Column(children: [unTile, if (cxTile != null) cxTile]);
                       },
                     ),
                   ),
@@ -377,7 +433,7 @@ class _PdvPageState extends State<PdvPage> {
       final price = _parseDecimal(priceCtl.text);
       if (name.isEmpty || qty <= 0) { _refocus(); return; }
       setState(() {
-        _items.add(_PdvItem(productId: null, name: name, qty: qty, unitPrice: price));
+        _items.add(_PdvItem(productId: null, name: '$name un', qty: qty, unitPrice: price, uom: 'UN', multiplier: 1));
         _selectedIndex = _items.length - 1;
       });
     }
@@ -492,10 +548,16 @@ class _PdvPageState extends State<PdvPage> {
     final close = _showBlockingOverlay(context, 'Finalizando venda...');
     try {
       final itemsPayload = _items.map((e) {
+        final base = {
+          'qty': e.qty,
+          'unitPrice': e.unitPrice,  // preço mostrado (UN ou CX)
+          'uom': e.uom,              // 'UN' | 'CX'
+          'multiplier': e.multiplier // itens por caixa (1 para UN)
+        };
         if (e.productId != null) {
-          return {'productId': e.productId, 'qty': e.qty, 'unitPrice': e.unitPrice};
+          return {'productId': e.productId, ...base};
         } else {
-          return {'manual': true, 'name': e.name, 'qty': e.qty, 'unitPrice': e.unitPrice};
+          return {'manual': true, 'name': e.name, ...base};
         }
       }).toList();
 
@@ -649,9 +711,7 @@ class _PdvPageState extends State<PdvPage> {
                         onLookup: _openLookupDialog,
                       ),
                       const SizedBox(height: 8),
-                      SizedBox(
-                        height: 8, // separador
-                      ),
+                      const SizedBox(height: 8), // separador
                     ],
                   ),
                 ),

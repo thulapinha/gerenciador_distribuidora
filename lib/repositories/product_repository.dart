@@ -11,17 +11,19 @@ import 'package:parse_server_sdk_flutter/parse_server_sdk_flutter.dart';
 /// - name (String)
 /// - barcode (String?)
 /// - unit (String)
-/// - price (Number)
+/// - price (Number)        // preço UN
 /// - cost (Number)
+/// - margin (Number?)      // margem em %
 /// - category (String?)
 /// - ncm (String?)
 /// - brand (String?)
-/// - margin (Number?)      // margem em %
 /// - stock (Number)
 /// - minStock (Number)
 /// - maxStock (Number)
 /// - active (Boolean)
 /// - image (File?)
+/// - packQty (Number?)     // itens por caixa
+/// - packPrice (Number?)   // preço da caixa
 class ProductRepository {
   static const String className = 'Product';
 
@@ -60,6 +62,8 @@ class ProductRepository {
     double maxStock = 0,
     bool active = true,
     ParseFileBase? imageFile,
+    int? packQty,
+    double? packPrice,
   }) {
     final obj = ParseObject(className);
     if (objectId != null && objectId.isNotEmpty) obj.objectId = objectId;
@@ -80,6 +84,9 @@ class ProductRepository {
       ..set<num>('maxStock', maxStock)
       ..set<bool>('active', active);
 
+    if (packQty != null) obj.set<num>('packQty', packQty);
+    if (packPrice != null) obj.set<num>('packPrice', packPrice);
+
     if (imageFile != null) obj.set<ParseFileBase>('image', imageFile);
     return obj;
   }
@@ -89,7 +96,6 @@ class ProductRepository {
   // ---------------------------------------------------------------------------
 
   /// Cria/atualiza produto.
-  // dentro de ProductRepository
   Future<void> upsertProduct({
     String? objectId,
     required String sku,
@@ -110,37 +116,37 @@ class ProductRepository {
     int? packQty,           // NOVOS
     double? packPrice,      // NOVOS
   }) async {
-    final o = ParseObject('Product');
-    if (objectId != null) o.objectId = objectId;
-    o
-      ..set<String>('sku', sku)
-      ..set<String>('name', name)
-      ..set<String?>('barcode', barcode)
-      ..set<String>('unit', unit)
-      ..set<num>('price', price)
-      ..set<num>('cost', cost)
-      ..set<String?>('category', category)
-      ..set<String?>('ncm', ncm)
-      ..set<String?>('brand', brand)
-      ..set<num>('margin', margin)
-      ..set<num>('stock', stock)
-      ..set<num>('minStock', minStock)
-      ..set<num>('maxStock', maxStock)
-      ..set<bool>('active', active);
-
-    if (packQty != null) o.set<num>('packQty', packQty);
-    if (packPrice != null) o.set<num>('packPrice', packPrice);
+    final o = _toParseObject(
+      objectId: objectId,
+      sku: sku,
+      name: name,
+      barcode: barcode,
+      unit: unit,
+      price: price,
+      cost: cost,
+      category: category,
+      ncm: ncm,
+      brand: brand,
+      margin: margin,
+      stock: stock,
+      minStock: minStock,
+      maxStock: maxStock,
+      active: active,
+      packQty: packQty,
+      packPrice: packPrice,
+      imageFile: imageFile,
+    );
 
     if (imageFile != null) {
-      await imageFile.save();
+      try { await imageFile.save(); } catch (_) {}
       o.set<ParseFileBase>('image', imageFile);
     }
+
     final res = await o.save();
     if (!res.success) {
       throw Exception(res.error?.message ?? 'Falha ao salvar produto');
     }
   }
-
 
   /// Busca produto por ID.
   Future<ParseObject?> getById(String objectId) async {
@@ -155,25 +161,29 @@ class ProductRepository {
   /// Busca primeiro produto por SKU (ativo por padrão).
   Future<ParseObject?> getBySku(String sku, {bool includeInactive = false}) async {
     debugPrint('[ProductRepo] getBySku "$sku" includeInactive=$includeInactive');
-    final q = QueryBuilder(ParseObject(className))..whereEqualTo('sku', sku);
+    final q = QueryBuilder<ParseObject>(ParseObject(className))
+      ..whereEqualTo('sku', sku)
+      ..setLimit(1);
     if (!includeInactive) q.whereEqualTo('active', true);
-    final ParseResponse? r = (await q.first()) as ParseResponse?; // pode retornar null em alguns ambientes
-    debugPrint('[ProductRepo] getBySku resp success=${r?.success} err=${r?.error?.code}:${r?.error?.message}');
-    if (r == null) return null;
+    final ParseResponse r = await q.query();
+    debugPrint('[ProductRepo] getBySku resp success=${r.success} err=${r.error?.code}:${r.error?.message}');
     if (!r.success && r.error?.code != 101) throw Exception(r.error?.message);
-    return r.result as ParseObject?;
+    if ((r.results ?? []).isEmpty) return null;
+    return r.results!.first as ParseObject;
   }
 
   /// Busca primeiro produto por código de barras (ativo por padrão).
   Future<ParseObject?> getByBarcode(String barcode, {bool includeInactive = false}) async {
     debugPrint('[ProductRepo] getByBarcode "$barcode" includeInactive=$includeInactive');
-    final q = QueryBuilder(ParseObject(className))..whereEqualTo('barcode', barcode);
+    final q = QueryBuilder<ParseObject>(ParseObject(className))
+      ..whereEqualTo('barcode', barcode)
+      ..setLimit(1);
     if (!includeInactive) q.whereEqualTo('active', true);
-    final ParseResponse? r = (await q.first()) as ParseResponse?;
-    debugPrint('[ProductRepo] getByBarcode resp success=${r?.success} err=${r?.error?.code}:${r?.error?.message}');
-    if (r == null) return null;
+    final ParseResponse r = await q.query();
+    debugPrint('[ProductRepo] getByBarcode resp success=${r.success} err=${r.error?.code}:${r.error?.message}');
     if (!r.success && r.error?.code != 101) throw Exception(r.error?.message);
-    return r.result as ParseObject?;
+    if ((r.results ?? []).isEmpty) return null;
+    return r.results!.first as ParseObject;
   }
 
   /// Busca 1 produto por qualquer código: tenta SKU exato, depois BARRAS exato,
@@ -191,9 +201,9 @@ class ProductRepository {
     if (byBar != null) return byBar;
 
     // 3) Fallback: contains (name/sku/barcode)
-    final qName  = QueryBuilder(ParseObject(className))..whereContains('name', t, caseSensitive: false);
-    final qSku   = QueryBuilder(ParseObject(className))..whereContains('sku', t, caseSensitive: false);
-    final qBar   = QueryBuilder(ParseObject(className))..whereContains('barcode', t, caseSensitive: false);
+    final qName  = QueryBuilder<ParseObject>(ParseObject(className))..whereContains('name', t, caseSensitive: false);
+    final qSku   = QueryBuilder<ParseObject>(ParseObject(className))..whereContains('sku', t, caseSensitive: false);
+    final qBar   = QueryBuilder<ParseObject>(ParseObject(className))..whereContains('barcode', t, caseSensitive: false);
 
     final root = ParseObject(className);
     final query = QueryBuilder.or(root, [qName, qSku, qBar])
@@ -210,7 +220,7 @@ class ProductRepository {
 
   /// Verifica se já existe outro produto com o mesmo SKU.
   Future<bool> existsSku(String sku, {String? exceptId}) async {
-    final q = QueryBuilder(ParseObject(className))..whereEqualTo('sku', sku);
+    final q = QueryBuilder<ParseObject>(ParseObject(className))..whereEqualTo('sku', sku);
     if (exceptId != null && exceptId.isNotEmpty) q.whereNotEqualTo('objectId', exceptId);
     q.setLimit(1);
     final ParseResponse r = await q.query();
@@ -221,7 +231,7 @@ class ProductRepository {
 
   /// Verifica se já existe outro produto com o mesmo código de barras.
   Future<bool> existsBarcode(String barcode, {String? exceptId}) async {
-    final q = QueryBuilder(ParseObject(className))..whereEqualTo('barcode', barcode);
+    final q = QueryBuilder<ParseObject>(ParseObject(className))..whereEqualTo('barcode', barcode);
     if (exceptId != null && exceptId.isNotEmpty) q.whereNotEqualTo('objectId', exceptId);
     q.setLimit(1);
     final ParseResponse r = await q.query();
@@ -280,10 +290,10 @@ class ProductRepository {
     debugPrint('[ProductRepo] search term="$t" limit=$limit includeInactive=$includeInactive');
     if (t.isEmpty) return [];
 
-    final qName  = QueryBuilder(ParseObject(className))..whereContains('name', t, caseSensitive: false);
-    final qSku   = QueryBuilder(ParseObject(className))..whereContains('sku', t, caseSensitive: false);
-    final qBar   = QueryBuilder(ParseObject(className))..whereContains('barcode', t, caseSensitive: false);
-    final qBrand = QueryBuilder(ParseObject(className))..whereContains('brand', t, caseSensitive: false);
+    final qName  = QueryBuilder<ParseObject>(ParseObject(className))..whereContains('name', t, caseSensitive: false);
+    final qSku   = QueryBuilder<ParseObject>(ParseObject(className))..whereContains('sku', t, caseSensitive: false);
+    final qBar   = QueryBuilder<ParseObject>(ParseObject(className))..whereContains('barcode', t, caseSensitive: false);
+    final qBrand = QueryBuilder<ParseObject>(ParseObject(className))..whereContains('brand', t, caseSensitive: false);
 
     final root = ParseObject(className);
     final query = QueryBuilder.or(root, [qName, qSku, qBar, qBrand])
@@ -309,7 +319,7 @@ class ProductRepository {
   }) async {
     debugPrint('[ProductRepo] listAll limit=$limit skip=$skip includeInactive=$includeInactive order=$orderField ${orderAsc ? 'ASC' : 'DESC'}');
 
-    final q = QueryBuilder(ParseObject(className))
+    final q = QueryBuilder<ParseObject>(ParseObject(className))
       ..setLimit(limit)
       ..setAmountToSkip(skip);
 
@@ -349,7 +359,7 @@ class ProductRepository {
   Future<List<ParseObject>> getManyByIds(List<String> ids) async {
     if (ids.isEmpty) return [];
     debugPrint('[ProductRepo] getManyByIds count=${ids.length}');
-    final q = QueryBuilder(ParseObject(className))..whereContainedIn('objectId', ids);
+    final q = QueryBuilder<ParseObject>(ParseObject(className))..whereContainedIn('objectId', ids);
     final ParseResponse r = await q.query();
     debugPrint('[ProductRepo] getManyByIds resp success=${r.success} count=${(r.results ?? []).length} err=${r.error?.message}');
     if (!r.success) throw Exception(r.error?.message);
