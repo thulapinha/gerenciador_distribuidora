@@ -1,300 +1,361 @@
 // lib/domain/services/pdf_service.dart
 import 'dart:typed_data';
+import 'package:flutter/material.dart' show BuildContext;
 import 'package:intl/intl.dart';
 import 'package:pdf/pdf.dart';
 import 'package:pdf/widgets.dart' as pw;
 import 'package:printing/printing.dart';
-import 'package:flutter/material.dart' show BuildContext;
 
 class PdfService {
-  // ===== Helpers ============================================================
-  static final _brl = NumberFormat.currency(locale: 'pt_BR', symbol: 'R\$');
-  static String _money(num v) => _brl.format(v);
-  static String _dt(String? iso) {
-    if (iso == null || iso.isEmpty) return '-';
-    final d = DateTime.tryParse(iso);
-    if (d == null) return '-';
-    return DateFormat('dd/MM/yyyy HH:mm:ss').format(d.toLocal());
+  static final NumberFormat _currency = NumberFormat.simpleCurrency(locale: 'pt_BR');
+  static final DateFormat _dateTime = DateFormat('dd/MM/yyyy HH:mm');
+
+  static String _money(num v) => _currency.format(v);
+  static num _nzNum(dynamic v) => (v is num) ? v : 0;
+  static String _fmtDate(dynamic v) {
+    if (v == null) return '-';
+    if (v is DateTime) return _dateTime.format(v);
+    if (v is String && v.isNotEmpty) {
+      try {
+        return _dateTime.format(DateTime.parse(v));
+      } catch (_) {}
+      return v;
+    }
+    return '-';
   }
 
-  // ===== API pública ========================================================
-  /// Constrói o PDF do extrato do caixa.
-  static Future<Uint8List> buildCashboxReport({
-    required Map<String, dynamic> summary,
-    required List<dynamic> sales,
-    required List<dynamic> movements,
-    String title = 'Extrato do Caixa',
-  }) async {
-    final pdf = pw.Document();
-
-    final theme = pw.ThemeData.withFont(
-      base: pw.Font.helvetica(),
-      bold: pw.Font.helveticaBold(),
-      italic: pw.Font.helveticaOblique(),
-      boldItalic: pw.Font.helveticaBoldOblique(),
-    );
-
-    final totals = (summary['totals'] as Map<String, dynamic>? ?? {});
-    final byMethod = (totals['byMethod'] as Map<String, dynamic>? ?? {});
-    final openingAmount = summary['openingAmount'] ?? 0;
-    final declared = summary['declaredClosingAmount'] ?? 0;
-    final expectedCash = summary['expectedCash'] ?? 0;
-    final difference = summary['difference'];
-    final isClosed = (summary['status'] ?? '').toString().toUpperCase() == 'CLOSED';
-
-    pw.Widget _kv(String k, String v, {PdfColor? color}) => pw.Row(
-      crossAxisAlignment: pw.CrossAxisAlignment.start,
-      children: [
-        pw.Expanded(flex: 3, child: pw.Text(k, style:  pw.TextStyle(fontWeight: pw.FontWeight.bold))),
-        pw.SizedBox(width: 10),
-        pw.Expanded(flex: 7, child: pw.Text(v, style: pw.TextStyle(color: color))),
-      ],
-    );
-
-    // Cabeçalho
-    pdf.addPage(
-      pw.MultiPage(
-        theme: theme,
-        pageFormat: PdfPageFormat.a4,
-        build: (ctx) {
-          final widgets = <pw.Widget>[
-            pw.Row(
-              mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
-              children: [
-                pw.Text(title, style: pw.TextStyle(fontSize: 18, fontWeight: pw.FontWeight.bold)),
-                pw.Text(DateFormat('dd/MM/yyyy HH:mm').format(DateTime.now())),
-              ],
-            ),
-            pw.SizedBox(height: 8),
-            pw.Divider(),
-
-            // Bloco identificação
-            pw.Container(
-              decoration: pw.BoxDecoration(color: PdfColors.grey100, borderRadius: pw.BorderRadius.circular(6)),
-              padding: const pw.EdgeInsets.all(10),
-              child: pw.Column(children: [
-                _kv('Sessão:', summary['sessionId'] ?? '-'),
-                _kv('Operador:', summary['operatorId'] ?? '-'),
-                _kv('Status:', (summary['status'] ?? '-').toString().toUpperCase()),
-                _kv('Abertura:', _dt(summary['openedAt'])),
-                _kv('Fechamento:', _dt(summary['closedAt'])),
-                pw.SizedBox(height: 6),
-                _kv('Troco inicial:', _money((openingAmount as num?) ?? 0)),
-                _kv('Declarado no fechamento:', _money((declared as num?) ?? 0)),
-                _kv('Esperado em caixa:', _money((expectedCash as num?) ?? 0)),
-                _kv(
-                  'Diferença:',
-                  _money((difference is num ? difference : 0)),
-                  color: (difference is num && difference != 0) ? PdfColors.red : PdfColors.black,
-                ),
-              ]),
-            ),
-
-            pw.SizedBox(height: 12),
-
-            // Totais gerais
-            pw.Text('Totais', style: pw.TextStyle(fontSize: 14, fontWeight: pw.FontWeight.bold)),
-            pw.SizedBox(height: 6),
-            pw.Container(
-              child: pw.Table(
-                border: pw.TableBorder.all(color: PdfColors.grey400),
-                columnWidths: const {
-                  0: pw.FlexColumnWidth(3),
-                  1: pw.FlexColumnWidth(2),
-                },
-                children: [
-                  pw.TableRow(
-                    decoration: const pw.BoxDecoration(color: PdfColors.grey200),
-                    children: [
-                      pw.Padding(padding: const pw.EdgeInsets.all(6), child: pw.Text('Bruto')),
-                      pw.Padding(padding: const pw.EdgeInsets.all(6), child: pw.Text(_money((totals['gross'] ?? 0) as num))),
-                    ],
-                  ),
-                  pw.TableRow(children: [
-                    pw.Padding(padding: const pw.EdgeInsets.all(6), child: pw.Text('Desconto')),
-                    pw.Padding(padding: const pw.EdgeInsets.all(6), child: pw.Text(_money((totals['discount'] ?? 0) as num))),
-                  ]),
-                  pw.TableRow(children: [
-                    pw.Padding(padding: const pw.EdgeInsets.all(6), child: pw.Text('Líquido')),
-                    pw.Padding(padding: const pw.EdgeInsets.all(6), child: pw.Text(_money((totals['net'] ?? 0) as num))),
-                  ]),
-                ],
-              ),
-            ),
-
-            pw.SizedBox(height: 12),
-
-            // Por método de pagamento
-            pw.Text('Por método de pagamento', style: pw.TextStyle(fontSize: 14, fontWeight: pw.FontWeight.bold)),
-            pw.SizedBox(height: 6),
-            pw.Table(
-              border: pw.TableBorder.all(color: PdfColors.grey400),
-              columnWidths: const {
-                0: pw.FlexColumnWidth(3),
-                1: pw.FlexColumnWidth(1),
-                2: pw.FlexColumnWidth(2),
-                3: pw.FlexColumnWidth(2),
-                4: pw.FlexColumnWidth(2),
-                5: pw.FlexColumnWidth(2),
-              },
-              children: [
-                pw.TableRow(
-                  decoration: const pw.BoxDecoration(color: PdfColors.grey200),
-                  children: [
-                    _th('Método'),
-                    _th('Qtde'),
-                    _th('Bruto'),
-                    _th('Líquido'),
-                    _th('Recebido'),
-                    _th('Troco'),
-                  ],
-                ),
-                ...byMethod.entries.map((e) {
-                  final m = e.key;
-                  final v = (e.value as Map).map((k, val) => MapEntry(k.toString(), (val as num?) ?? 0));
-                  return pw.TableRow(children: [
-                    _td(m),
-                    _td('${v['count'] ?? 0}'),
-                    _td(_money(v['subtotal'] ?? 0)),
-                    _td(_money(v['total'] ?? 0)),
-                    _td(_money(v['received'] ?? 0)),
-                    _td(_money(v['change'] ?? 0)),
-                  ]);
-                }),
-              ],
-            ),
-
-            pw.SizedBox(height: 12),
-
-            // Vendas
-            pw.Text('Vendas', style: pw.TextStyle(fontSize: 14, fontWeight: pw.FontWeight.bold)),
-            pw.SizedBox(height: 6),
-            sales.isEmpty
-                ? pw.Text('Nenhuma venda registrada.')
-                : pw.Table(
-              border: pw.TableBorder.all(color: PdfColors.grey400),
-              columnWidths: const {
-                0: pw.FlexColumnWidth(2.2), // nº
-                1: pw.FlexColumnWidth(2.8), // data
-                2: pw.FlexColumnWidth(2.2), // método
-                3: pw.FlexColumnWidth(2.2), // bruto
-                4: pw.FlexColumnWidth(2.2), // desconto
-                5: pw.FlexColumnWidth(2.2), // líquido
-              },
-              children: [
-                pw.TableRow(
-                  decoration: const pw.BoxDecoration(color: PdfColors.grey200),
-                  children: [
-                    _th('Número'),
-                    _th('Data'),
-                    _th('Pagamento'),
-                    _th('Bruto'),
-                    _th('Desc.'),
-                    _th('Líquido'),
-                  ],
-                ),
-                ...sales.map<pw.TableRow>((s) {
-                  final sm = (s as Map<String, dynamic>);
-                  return pw.TableRow(children: [
-                    _td((sm['number'] ?? '-') as String? ?? '-'),
-                    _td(_dt(sm['createdAt'] as String?)),
-                    _td((sm['paymentMethod'] ?? '-') as String),
-                    _td(_money((sm['subtotal'] ?? 0) as num)),
-                    _td(_money((sm['discount'] ?? 0) as num)),
-                    _td(_money((sm['total'] ?? 0) as num)),
-                  ]);
-                }),
-              ],
-            ),
-
-            pw.SizedBox(height: 12),
-
-            // Movimentos
-            pw.Text('Movimentos de Caixa', style: pw.TextStyle(fontSize: 14, fontWeight: pw.FontWeight.bold)),
-            pw.SizedBox(height: 6),
-            movements.isEmpty
-                ? pw.Text('Sem movimentos.')
-                : pw.Table(
-              border: pw.TableBorder.all(color: PdfColors.grey400),
-              columnWidths: const {
-                0: pw.FlexColumnWidth(2.8), // data
-                1: pw.FlexColumnWidth(2.0), // tipo
-                2: pw.FlexColumnWidth(2.2), // valor
-                3: pw.FlexColumnWidth(5.0), // obs
-              },
-              children: [
-                pw.TableRow(
-                  decoration: const pw.BoxDecoration(color: PdfColors.grey200),
-                  children: [
-                    _th('Data'),
-                    _th('Tipo'),
-                    _th('Valor'),
-                    _th('Observação'),
-                  ],
-                ),
-                ...movements.map<pw.TableRow>((m) {
-                  final mm = (m as Map<String, dynamic>);
-                  return pw.TableRow(children: [
-                    _td(_dt(mm['createdAt'] as String?)),
-                    _td((mm['type'] ?? '-') as String),
-                    _td(_money((mm['amount'] ?? 0) as num)),
-                    _td((mm['note'] ?? '') as String),
-                  ]);
-                }),
-              ],
-            ),
-
-            pw.SizedBox(height: 18),
-            pw.Divider(),
-            pw.Align(
-              alignment: pw.Alignment.centerRight,
-              child: pw.Text(
-                isClosed ? 'Documento gerado para conferência do fechamento.' : 'Documento parcial (sessão aberta).',
-                style: const pw.TextStyle(fontSize: 10, color: PdfColors.grey600),
-              ),
-            ),
-          ];
-
-          return widgets;
-        },
-      ),
-    );
-
-    return pdf.save();
-  }
-
-  /// Abre a caixa de diálogo de **impressão** usando o PDF gerado.
+  // ========== API pública ==========
   static Future<void> printCashboxReport(
       BuildContext context, {
         required Map<String, dynamic> summary,
-        required List<dynamic> sales,
-        required List<dynamic> movements,
+        required List<Map<String, dynamic>> sales,
+        required List<Map<String, dynamic>> movements,
       }) async {
-    final data = await buildCashboxReport(
-      summary: summary,
-      sales: sales,
-      movements: movements,
-    );
-    await Printing.layoutPdf(onLayout: (format) async => data);
+    final bytes = await _buildCashboxReportBytes(summary: summary, sales: sales, movements: movements);
+    await Printing.layoutPdf(onLayout: (_) async => bytes);
   }
 
-  /// Abre a caixa para **salvar/compartilhar** o PDF (útil no mobile).
   static Future<void> shareCashboxReport({
     required Map<String, dynamic> summary,
-    required List<dynamic> sales,
-    required List<dynamic> movements,
-    String filename = 'extrato_caixa.pdf',
+    required List<Map<String, dynamic>> sales,
+    required List<Map<String, dynamic>> movements,
   }) async {
-    final data = await buildCashboxReport(
-      summary: summary,
-      sales: sales,
-      movements: movements,
-    );
-    await Printing.sharePdf(bytes: data, filename: filename);
+    final bytes = await _buildCashboxReportBytes(summary: summary, sales: sales, movements: movements);
+    await Printing.sharePdf(bytes: bytes, filename: 'extrato_caixa.pdf');
   }
 
-  // ===== Table cells helpers ===============================================
-  static pw.Widget _th(String text) =>
-      pw.Padding(padding: const pw.EdgeInsets.all(6), child: pw.Text(text, style: pw.TextStyle(fontWeight: pw.FontWeight.bold)));
-  static pw.Widget _td(String text) => pw.Padding(padding: const pw.EdgeInsets.all(6), child: pw.Text(text));
+  // ========== Builder ==========
+  static Future<Uint8List> _buildCashboxReportBytes({
+    required Map<String, dynamic> summary,
+    required List<Map<String, dynamic>> sales,
+    required List<Map<String, dynamic>> movements,
+  }) async {
+    final doc = pw.Document();
+
+    // Resumos básicos
+    final totals = Map<String, dynamic>.from(summary['totals'] ?? {});
+    final byMethod = Map<String, dynamic>.from(totals['byMethod'] ?? {});
+    final openingAmount = _nzNum(summary['openingAmount']);
+    final declared = _nzNum(summary['declaredClosingAmount']);
+    final expectedCash = _nzNum(summary['expectedCash']);
+    final difference = _nzNum(summary['difference']);
+
+    final operatorDisplay = (summary['operatorName'] ??
+        summary['operator'] ??
+        summary['operatorId'] ??
+        '-')
+        .toString();
+
+    final diffColor = difference == 0
+        ? PdfColors.green600
+        : (difference > 0 ? PdfColors.orange600 : PdfColors.red);
+
+    final baseText = pw.TextStyle(fontSize: 10);
+    final label = pw.TextStyle(fontSize: 10, fontWeight: pw.FontWeight.bold);
+
+    doc.addPage(
+      pw.MultiPage(
+        pageTheme: pw.PageTheme(
+          margin: const pw.EdgeInsets.fromLTRB(28, 36, 28, 36),
+          theme: pw.ThemeData.withFont(),
+        ),
+        header: (ctx) => pw.Column(
+          crossAxisAlignment: pw.CrossAxisAlignment.stretch,
+          children: [
+            pw.Text('Extrato do Caixa',
+                style: pw.TextStyle(fontSize: 18, fontWeight: pw.FontWeight.bold)),
+            pw.SizedBox(height: 2),
+            pw.Row(
+              mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
+              children: [
+                pw.Text('Gerado em: ${_dateTime.format(DateTime.now())}',
+                    style: pw.TextStyle(fontSize: 9, color: PdfColors.grey600)),
+                pw.Text('Página ${ctx.pageNumber}/${ctx.pagesCount}',
+                    style: pw.TextStyle(fontSize: 9, color: PdfColors.grey600)),
+              ],
+            ),
+            pw.SizedBox(height: 6),
+            pw.Divider(color: PdfColors.grey400, height: 1),
+            pw.SizedBox(height: 10),
+          ],
+        ),
+        build: (context) => [
+          // Bloco: Cabeçalho da sessão
+          pw.Container(
+            padding: const pw.EdgeInsets.all(10),
+            decoration: pw.BoxDecoration(
+              color: PdfColors.grey100,
+              borderRadius: pw.BorderRadius.circular(6),
+              border: pw.Border.all(color: PdfColors.grey300, width: 0.5),
+            ),
+            child: pw.Column(
+              crossAxisAlignment: pw.CrossAxisAlignment.start,
+              children: [
+                _kv('Sessão:', (summary['sessionId'] ?? '-').toString(), label, baseText),
+                _kv('Operador:', operatorDisplay, label, baseText),
+                _kv('Status:', (summary['status'] ?? '-').toString().toUpperCase(), label, baseText),
+                _kv('Abertura:', _fmtDate(summary['openedAt']), label, baseText),
+                _kv('Fechamento:', _fmtDate(summary['closedAt']), label, baseText),
+                pw.SizedBox(height: 6),
+                _kv('Troco inicial:', _money(openingAmount), label, baseText),
+                _kv('Declarado no fechamento:', _money(declared), label, baseText),
+                _kv('Esperado em caixa:', _money(expectedCash), label, baseText),
+                pw.Row(children: [
+                  pw.Text('Diferença: ', style: label),
+                  pw.Text(_money(difference),
+                      style: baseText.copyWith(
+                        color: diffColor,
+                        fontWeight: pw.FontWeight.bold,
+                      )),
+                ]),
+              ],
+            ),
+          ),
+          pw.SizedBox(height: 12),
+
+          // Bloco: Totais
+          pw.Text('Totais', style: pw.TextStyle(fontSize: 12, fontWeight: pw.FontWeight.bold)),
+          pw.SizedBox(height: 6),
+          pw.Table(
+            border: pw.TableBorder.all(color: PdfColors.grey300, width: 0.5),
+            columnWidths: const {
+              0: pw.FlexColumnWidth(1),
+              1: pw.FlexColumnWidth(1),
+              2: pw.FlexColumnWidth(1),
+            },
+            defaultVerticalAlignment: pw.TableCellVerticalAlignment.middle,
+            children: [
+              pw.TableRow(
+                decoration: const pw.BoxDecoration(color: PdfColors.grey200),
+                children: [
+                  _th('Bruto'),
+                  _th('Desconto'),
+                  _th('Líquido'),
+                ],
+              ),
+              pw.TableRow(
+                children: [
+                  _td(_money(_nzNum(totals['gross']))),
+                  _td(_money(_nzNum(totals['discount']))),
+                  _td(_money(_nzNum(totals['net']))),
+                ],
+              ),
+            ],
+          ),
+          pw.SizedBox(height: 12),
+
+          // Bloco: Por método de pagamento
+          pw.Text('Por método de pagamento',
+              style: pw.TextStyle(fontSize: 12, fontWeight: pw.FontWeight.bold)),
+          pw.SizedBox(height: 6),
+          _byMethodTable(byMethod),
+
+          pw.SizedBox(height: 14),
+
+          // Bloco: Vendas
+          pw.Text('Vendas', style: pw.TextStyle(fontSize: 12, fontWeight: pw.FontWeight.bold)),
+          pw.SizedBox(height: 6),
+          if (sales.isEmpty)
+            pw.Text('Nenhuma venda no período.', style: baseText)
+          else
+            _salesTable(sales),
+
+          pw.SizedBox(height: 14),
+
+          // Bloco: Movimentos de Caixa
+          pw.Text('Movimentos de Caixa',
+              style: pw.TextStyle(fontSize: 12, fontWeight: pw.FontWeight.bold)),
+          pw.SizedBox(height: 6),
+          if (movements.isEmpty)
+            pw.Text('Sem movimentos.', style: baseText)
+          else
+            _movesTable(movements),
+        ],
+      ),
+    );
+
+    return doc.save();
+  }
+
+  // ========== widgets helpers (pdf) ==========
+  static pw.Widget _kv(String k, String v, pw.TextStyle kStyle, pw.TextStyle vStyle) {
+    return pw.Padding(
+      padding: const pw.EdgeInsets.only(bottom: 2),
+      child: pw.Row(
+        crossAxisAlignment: pw.CrossAxisAlignment.start,
+        children: [
+          pw.SizedBox(width: 140, child: pw.Text(k, style: kStyle)),
+          pw.Expanded(child: pw.Text(v, style: vStyle)),
+        ],
+      ),
+    );
+  }
+
+  static pw.Widget _th(String text) => pw.Padding(
+    padding: const pw.EdgeInsets.symmetric(vertical: 6, horizontal: 8),
+    child: pw.Text(text,
+        style: pw.TextStyle(fontSize: 10, fontWeight: pw.FontWeight.bold)),
+  );
+
+  static pw.Widget _td(String text) => pw.Padding(
+    padding: const pw.EdgeInsets.symmetric(vertical: 6, horizontal: 8),
+    child: pw.Text(text, style: const pw.TextStyle(fontSize: 10)),
+  );
+
+  static pw.Widget _byMethodTable(Map<String, dynamic> byMethod) {
+    final rows = <pw.TableRow>[
+      pw.TableRow(
+        decoration: const pw.BoxDecoration(color: PdfColors.grey200),
+        children: [
+          _th('Método'),
+          _th('Qtde'),
+          _th('Bruto'),
+          _th('Líquido'),
+          _th('Recebido'),
+          _th('Troco'),
+        ],
+      ),
+    ];
+
+    final keys = byMethod.keys.toList()..sort();
+    for (final k in keys) {
+      final m = Map<String, dynamic>.from(byMethod[k] as Map);
+      rows.add(
+        pw.TableRow(
+          children: [
+            _td(k),
+            _td('${_nzNum(m['count'])}'),
+            _td(_money(_nzNum(m['subtotal']))),
+            _td(_money(_nzNum(m['total']))),
+            _td(_money(_nzNum(m['received']))),
+            _td(_money(_nzNum(m['change']))),
+          ],
+        ),
+      );
+    }
+
+    return pw.Table(
+      border: pw.TableBorder.all(color: PdfColors.grey300, width: 0.5),
+      columnWidths: const {
+        0: pw.FlexColumnWidth(1.4),
+        1: pw.FlexColumnWidth(0.7),
+        2: pw.FlexColumnWidth(1),
+        3: pw.FlexColumnWidth(1),
+        4: pw.FlexColumnWidth(1),
+        5: pw.FlexColumnWidth(1),
+      },
+      defaultVerticalAlignment: pw.TableCellVerticalAlignment.middle,
+      children: rows,
+    );
+  }
+
+  static pw.Widget _salesTable(List<Map<String, dynamic>> sales) {
+    final rows = <pw.TableRow>[
+      pw.TableRow(
+        decoration: const pw.BoxDecoration(color: PdfColors.grey200),
+        children: [
+          _th('Número'),
+          _th('Data'),
+          _th('Pagamento'),
+          _th('Bruto'),
+          _th('Desc.'),
+          _th('Líquido'),
+          _th('Recebido'),
+          _th('Troco'),
+        ],
+      ),
+    ];
+
+    for (final s in sales) {
+      rows.add(
+        pw.TableRow(
+          children: [
+            _td((s['number'] ?? s['objectId'] ?? '').toString()),
+            _td(_fmtDate(s['createdAt'])),
+            _td((s['paymentMethod'] ?? '').toString()),
+            _td(_money(_nzNum(s['subtotal']))),
+            _td(_money(_nzNum(s['discount']))),
+            _td(_money(_nzNum(s['total']))),
+            _td(_money(_nzNum(s['received']))),
+            _td(_money(_nzNum(s['change']))),
+          ],
+        ),
+      );
+    }
+
+    return pw.Table(
+      border: pw.TableBorder.all(color: PdfColors.grey300, width: 0.5),
+      columnWidths: const {
+        0: pw.FlexColumnWidth(0.9),
+        1: pw.FlexColumnWidth(1.2),
+        2: pw.FlexColumnWidth(1.1),
+        3: pw.FlexColumnWidth(0.9),
+        4: pw.FlexColumnWidth(0.9),
+        5: pw.FlexColumnWidth(0.9),
+        6: pw.FlexColumnWidth(0.9),
+        7: pw.FlexColumnWidth(0.9),
+      },
+      defaultVerticalAlignment: pw.TableCellVerticalAlignment.middle,
+      children: rows,
+    );
+  }
+
+  static pw.Widget _movesTable(List<Map<String, dynamic>> moves) {
+    final rows = <pw.TableRow>[
+      pw.TableRow(
+        decoration: const pw.BoxDecoration(color: PdfColors.grey200),
+        children: [
+          _th('Tipo'),
+          _th('Data'),
+          _th('Valor'),
+          _th('Obs.'),
+        ],
+      ),
+    ];
+
+    for (final m in moves) {
+      rows.add(
+        pw.TableRow(
+          children: [
+            _td((m['type'] ?? '').toString()),
+            _td(_fmtDate(m['createdAt'])),
+            _td(_money(_nzNum(m['amount']))),
+            _td((m['note'] ?? '').toString()),
+          ],
+        ),
+      );
+    }
+
+    return pw.Table(
+      border: pw.TableBorder.all(color: PdfColors.grey300, width: 0.5),
+      columnWidths: const {
+        0: pw.FlexColumnWidth(0.8),
+        1: pw.FlexColumnWidth(1.2),
+        2: pw.FlexColumnWidth(0.8),
+        3: pw.FlexColumnWidth(2.2),
+      },
+      defaultVerticalAlignment: pw.TableCellVerticalAlignment.middle,
+      children: rows,
+    );
+  }
 }
