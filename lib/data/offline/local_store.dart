@@ -1,6 +1,8 @@
 import 'dart:convert';
 import 'package:sqflite/sqflite.dart';
 
+
+
 class LocalStore {
   LocalStore._();
   static final LocalStore instance = LocalStore._();

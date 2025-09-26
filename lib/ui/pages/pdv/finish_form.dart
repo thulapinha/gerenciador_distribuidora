@@ -1,167 +1,237 @@
-part of 'package:gerenciador_distribuidora/ui/pages/pdv_page.dart';
+// lib/ui/pages/pdv/finish_form.dart
+part of '../pdv_page.dart';
 
-// ===== Finish form ===========================================================
 class _FinishForm extends StatefulWidget {
+  final _PayMethod method;
+  final List<_PdvItem> items;
+  final double total;
+  final double received;
+  final double change;
+  final ValueChanged<double> onReceivedChanged;
+  final VoidCallback onFinalize;     // não-PIX
+  final VoidCallback onPixApproved;  // quando PIX aprovar
+  final VoidCallback onBack;
+
   const _FinishForm({
     required this.method,
+    required this.items,
     required this.total,
     required this.received,
     required this.change,
     required this.onReceivedChanged,
     required this.onFinalize,
+    required this.onPixApproved,
     required this.onBack,
   });
-
-  final _PayMethod method;
-  final double total;
-  final double received;
-  final double change;
-  final ValueChanged<double> onReceivedChanged;
-  final VoidCallback onFinalize;
-  final VoidCallback onBack;
 
   @override
   State<_FinishForm> createState() => _FinishFormState();
 }
 
 class _FinishFormState extends State<_FinishForm> {
-  late final TextEditingController _ctl;
+  bool _busy = false;
 
-  @override
-  void initState() {
-    super.initState();
-    _ctl = TextEditingController(text: widget.received.toStringAsFixed(2).replaceAll('.', ','));
+  String _fmt(num v) => 'R\$ ${v.toStringAsFixed(2)}';
+
+  List<Map<String, dynamic>> _buildItemsPayload() {
+    return widget.items.map((e) {
+      final base = {
+        'qty': e.qty,
+        'unitPrice': e.unitPrice,
+        'uom': e.uom,
+        'multiplier': e.multiplier,
+      };
+      if (e.productId != null) return {'productId': e.productId, ...base};
+      return {'manual': true, 'name': e.name, ...base};
+    }).toList();
   }
 
-  @override
-  void didUpdateWidget(covariant _FinishForm oldWidget) {
-    super.didUpdateWidget(oldWidget);
-    // se o valor vindo de fora mudar (ex.: pré-preenchido), refletir sem quebrar caret
-    if (oldWidget.received != widget.received &&
-        _parseFinish(_ctl.text) != widget.received) {
-      final sel = _ctl.selection;
-      _ctl.text = widget.received.toStringAsFixed(2).replaceAll('.', ',');
-      _ctl.selection = TextSelection.collapsed(offset: _ctl.text.length);
-      // mantém caret ao final
+  Future<void> _payWithPix() async {
+    setState(() => _busy = true);
+    try {
+      final clientTxnId =
+          'txn-${DateTime.now().millisecondsSinceEpoch}-${math.Random().nextInt(0x7fffffff)}';
+
+      final payload = {
+        'items': _buildItemsPayload(),
+        'discount': 0.0,
+        'customerId': null,
+        'customerCpf': null,
+        'note': null,
+        'clientTxnId': clientTxnId,
+        'createdAtLocal': DateTime.now().toIso8601String(),
+        'total': widget.total,
+      };
+
+      final fn = ParseCloudFunction('mpCreatePixPayment');
+      final resp = await fn.execute(parameters: payload);
+
+      if (!mounted) return;
+
+      if (!(resp.success)) {
+        final msg = resp.error?.message ??
+            (resp.result is Map ? (resp.result['message']?.toString() ?? '') : '');
+        _showError('Falha ao criar pagamento.\n$msg');
+        return;
+      }
+
+      final data = (resp.result as Map).cast<String, dynamic>();
+
+      final saleId   = (data['saleId'] ?? data['sale_id'] ?? '').toString();
+      final payIdStr = (data['paymentId'] ?? data['mpPaymentId'] ?? data['id'] ?? data['payment_id'] ?? '').toString();
+
+      // TOP-LEVEL: agora considera qr_code_base64 também
+      final qrCode   = (data['qr_code'] ?? _deep(data, ['point_of_interaction','transaction_data','qr_code']))?.toString();
+      final qrBase64 = (data['qr_code_base64'] ?? data['qr_base64'] ??
+          _deep(data, ['point_of_interaction','transaction_data','qr_code_base64']))?.toString();
+      final ticket   = (data['ticket_url'] ??
+          _deep(data, ['point_of_interaction','transaction_data','ticket_url']))?.toString();
+
+      if (payIdStr.isEmpty) {
+        _showError('Retorno sem paymentId/mpPaymentId.');
+        return;
+      }
+
+      final dialogResult = await showDialog<PixDialogResult>(
+        context: context,
+        barrierDismissible: false,
+        builder: (_) => PixPaymentDialog(
+          saleId: saleId,
+          paymentId: payIdStr, // dialog converte p/ number ao chamar o cloud
+          qrCode: qrCode,
+          qrBase64Png: qrBase64,
+          ticketUrl: ticket,
+        ),
+      );
+
+      if (!mounted) return;
+
+      if (dialogResult == PixDialogResult.approved) {
+        widget.onPixApproved();
+      } else if (dialogResult == PixDialogResult.pending) {
+        _showInfo('Pagamento ainda pendente. Verifique depois.');
+      } else if (dialogResult == PixDialogResult.cancelled) {
+        _showInfo('Pagamento cancelado.');
+      } else if (dialogResult == PixDialogResult.expired) {
+        _showInfo('Pagamento expirado.');
+      } else if (dialogResult == PixDialogResult.rejected) {
+        _showInfo('Pagamento rejeitado.');
+      }
+    } catch (e) {
+      _showError('Erro inesperado: $e');
+    } finally {
+      if (mounted) setState(() => _busy = false);
     }
   }
 
-  @override
-  void dispose() {
-    _ctl.dispose();
-    super.dispose();
+  dynamic _deep(Map<String, dynamic> m, List<String> path) {
+    dynamic v = m;
+    for (final k in path) {
+      if (v is Map && v.containsKey(k)) {
+        v = v[k];
+      } else {
+        return null;
+      }
+    }
+    return v;
   }
 
-  String _money(num v) => 'R\$ ${v.toStringAsFixed(2).replaceAll('.', ',')}';
-
-  @override
-  Widget build(BuildContext context) {
-    return Expanded(
-      child: Padding(
-        padding: const EdgeInsets.all(24.0),
-        child: Column(
-          children: [
-            Align(
-              alignment: Alignment.centerLeft,
-              child: Text(_title(widget.method), style: Theme.of(context).textTheme.titleLarge),
-            ),
-            const SizedBox(height: 16),
-            Row(
-              children: [
-                Expanded(
-                  child: TextField(
-                    controller: _ctl,
-                    onChanged: (t) => widget.onReceivedChanged(_parseFinish(t)),
-                    onSubmitted: (_) => widget.onFinalize(), // ENTER conclui
-                    keyboardType: const TextInputType.numberWithOptions(decimal: true),
-                    decoration: const InputDecoration(
-                      labelText: 'Valor recebido',
-                      border: OutlineInputBorder(),
-                      prefixIcon: Icon(Icons.payments),
-                    ),
-                  ),
-                ),
-                const SizedBox(width: 12),
-                IconButton.filledTonal(
-                  onPressed: widget.onBack,
-                  icon: const Icon(Icons.arrow_back),
-                  tooltip: 'Voltar (F11)',
-                ),
-                const SizedBox(width: 8),
-                FilledButton.icon(
-                  onPressed: widget.onFinalize,
-                  icon: const Icon(Icons.check),
-                  label: const Text('FINALIZAR (F12/F8)'),
-                ),
-              ],
-            ),
-            const SizedBox(height: 16),
-            Row(
-              children: [
-                _FinishCard(title: _money(widget.total),    subtitle: 'Valor total do pedido'),
-                const SizedBox(width: 12),
-                _FinishCard(title: _money(widget.received), subtitle: 'Valor recebido'),
-                const SizedBox(width: 12),
-                _FinishCard(title: _money(widget.change),   subtitle: 'Troco'),
-              ],
-            )
-          ],
-        ),
+  void _showError(String msg) {
+    showDialog(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: const Text('Erro'),
+        content: Text(msg),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context), child: const Text('Fechar')),
+        ],
       ),
     );
   }
 
-  double _parseFinish(String t) {
-    var s = t.trim();
-    if (s.isEmpty) return 0;
-    s = s.replaceAll(RegExp(r'[^0-9,.\-]'), '');
-    final hasComma = s.contains(',');
-    final hasDot = s.contains('.');
-    if (hasComma && hasDot) {
-      s = s.replaceAll('.', '').replaceAll(',', '.');
-    } else if (hasComma) {
-      s = s.replaceAll(',', '.');
-    }
-    return double.tryParse(s) ?? 0;
+  void _showInfo(String msg) {
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
   }
 
-  String _title(_PayMethod m) {
-    switch (m) {
-      case _PayMethod.cash:         return '1 - Dinheiro';
-      case _PayMethod.check:        return '1 - Cheque';
-      case _PayMethod.cardCredit:   return '1 - Cartão de Crédito';
-      case _PayMethod.cardDebit:    return '1 - Cartão de Débito';
-      case _PayMethod.storeCredit:  return '1 - Crédito Loja';
-      case _PayMethod.foodVoucher:  return '1 - Vale Alimentação';
-      case _PayMethod.mealVoucher:  return '1 - Vale Refeição';
-      case _PayMethod.giftCard:     return '1 - Vale Presente';
-      case _PayMethod.fuelVoucher:  return '1 - Vale Combustível';
-      case _PayMethod.other:        return '1 - Outros';
-      case _PayMethod.pix:          return '1 - PIX';
-      case _PayMethod.mercadoPago:  return '1 - Mercado Pago';
-    }
-  }
-}
-
-class _FinishCard extends StatelessWidget {
-  const _FinishCard({required this.title, required this.subtitle});
-  final String title;
-  final String subtitle;
   @override
   Widget build(BuildContext context) {
-    final cs = Theme.of(context).colorScheme;
-    return Expanded(
-      child: Container(
-        padding: const EdgeInsets.all(18),
-        decoration: BoxDecoration(
-          border: Border.all(color: cs.outlineVariant),
-          borderRadius: BorderRadius.circular(12),
-        ),
-        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          Text(title, style: Theme.of(context).textTheme.headlineSmall!.copyWith(fontWeight: FontWeight.w700)),
-          const SizedBox(height: 4),
-          Text(subtitle, style: Theme.of(context).textTheme.labelLarge!.copyWith(color: cs.onSurfaceVariant)),
-        ]),
+    final isPix = widget.method == _PayMethod.pix;
+
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 16),
+      child: Column(
+        children: [
+          Card(
+            child: Padding(
+              padding: const EdgeInsets.all(12),
+              child: Column(
+                children: [
+                  Row(
+                    children: [
+                      const Text('Total', style: TextStyle(fontWeight: FontWeight.w700)),
+                      const Spacer(),
+                      Text(_fmt(widget.total), style: const TextStyle(fontWeight: FontWeight.w700)),
+                    ],
+                  ),
+                  const SizedBox(height: 10),
+                  if (!isPix) ...[
+                    Row(
+                      children: [
+                        const Text('Recebido'),
+                        const Spacer(),
+                        SizedBox(
+                          width: 160,
+                          child: TextField(
+                            textAlign: TextAlign.right,
+                            controller: TextEditingController(
+                              text: widget.received.toStringAsFixed(2),
+                            ),
+                            keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                            onSubmitted: (s) {
+                              final v = double.tryParse(s.replaceAll(',', '.')) ?? widget.total;
+                              widget.onReceivedChanged(v);
+                              setState(() {});
+                            },
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 6),
+                    Row(
+                      children: [
+                        const Text('Troco'),
+                        const Spacer(),
+                        Text(_fmt(widget.change)),
+                      ],
+                    ),
+                  ],
+                ],
+              ),
+            ),
+          ),
+          const SizedBox(height: 8),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              OutlinedButton(
+                onPressed: _busy ? null : widget.onBack,
+                child: const Text('Voltar (F11)'),
+              ),
+              if (isPix)
+                FilledButton.icon(
+                  onPressed: _busy ? null : _payWithPix,
+                  icon: const Icon(Icons.qr_code_2),
+                  label: const Text('Pagar com PIX'),
+                )
+              else
+                FilledButton.icon(
+                  onPressed: _busy ? null : widget.onFinalize,
+                  icon: const Icon(Icons.check_circle),
+                  label: const Text('Finalizar (F8/F12/Enter)'),
+                ),
+            ],
+          ),
+        ],
       ),
     );
   }

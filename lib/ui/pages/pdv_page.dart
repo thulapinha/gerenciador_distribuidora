@@ -9,6 +9,8 @@ import 'package:parse_server_sdk_flutter/parse_server_sdk_flutter.dart';
 import 'package:gerenciador_distribuidora/repositories/product_repository.dart';
 import 'package:gerenciador_distribuidora/features/cashbox/cashbox_bar.dart';
 
+import '../widgets/payment_pix_dialog.dart';
+
 // ===== PARTS ================================================================
 part 'pdv/model.dart';
 part 'pdv/overlay.dart';
@@ -28,9 +30,7 @@ enum _PayMethod {
   giftCard, fuelVoucher, other, pix, mercadoPago
 }
 
-// ===== Helpers GLOBAIS (disponíveis para as parts) ==========================
-/// Formata dinheiro no padrão brasileiro.
-/// (Função global para que `search_bar.dart` possa chamar sem erro.)
+// ===== Helpers globais ======================================================
 String _money(num v) => 'R\$ ${v.toStringAsFixed(2).replaceAll('.', ',')}';
 
 // ===== PAGE =================================================================
@@ -49,29 +49,28 @@ class _PdvPageState extends State<PdvPage> {
   // Busca
   final TextEditingController _codeCtl = TextEditingController();
 
-  // Desconto e recebido
+  // Valores
   double _discount = 0.0;
   double _received = 0.0;
 
-  // Tabela
+  // Itens
   final List<_PdvItem> _items = [];
   int? _selectedIndex;
 
-  // Etapas / pagamento
+  // Etapas
   _PdvStage _stage = _PdvStage.items;
   _PayMethod? _selectedMethod;
 
   // UI
   String _priceTier = 'Preço Padrão';
 
-  // Status servidor + usuário + caixa
+  // Status/usuário/caixa
   bool _serverOnline = true;
   String _userName = '-';
-  String _role = 'admin';       // admin | cashier | ...
-  bool _cashOpen = true;        // admin ignora; cashier precisa estar true
+  String _role = 'admin';
+  bool _cashOpen = true;
   Timer? _hb;
 
-  // ===== Helpers =============================================================
   String _fmtQty(double v) =>
       v.truncateToDouble() == v ? v.toStringAsFixed(0) : v.toStringAsFixed(2);
 
@@ -95,7 +94,6 @@ class _PdvPageState extends State<PdvPage> {
   bool get _isAdmin => _role == 'admin';
   bool get _needsCashOpen => !_isAdmin && _role == 'cashier' && !_cashOpen;
 
-  // ------------------------- lifecycle --------------------------------------
   @override
   void initState() {
     super.initState();
@@ -116,14 +114,14 @@ class _PdvPageState extends State<PdvPage> {
     if (mounted) FocusScope.of(context).requestFocus(_focusNode);
   }
 
-  // ---------- usuário/role + heartbeat --------------------------------------
   Future<void> _resolveUserAndRole() async {
     try {
       final u = await ParseUser.currentUser() as ParseUser?;
-      final name = (u?.get<String>('name')) ?? (u?.get<String>('fullName')) ?? u?.username ?? '-';
+      final name = (u?.get<String>('name')) ??
+          (u?.get<String>('fullName')) ??
+          u?.username ?? '-';
       String role = 'admin';
 
-      // consulta perfil
       try {
         final r = await ParseCloudFunction('getAccessProfile').execute();
         if (r.success && r.result is Map && (r.result['role'] is String)) {
@@ -131,11 +129,8 @@ class _PdvPageState extends State<PdvPage> {
         }
       } catch (_) {}
 
-      // status do caixa (para operador)
       bool open = true;
-      if (role == 'cashier') {
-        open = await _fetchCashOpen();
-      }
+      if (role == 'cashier') open = await _fetchCashOpen();
 
       if (!mounted) return;
       setState(() {
@@ -149,9 +144,7 @@ class _PdvPageState extends State<PdvPage> {
   Future<bool> _fetchCashOpen() async {
     try {
       final r = await ParseCloudFunction('getCashSessionStatus').execute();
-      if (r.success && r.result is Map) {
-        return (r.result['open'] == true);
-      }
+      if (r.success && r.result is Map) return (r.result['open'] == true);
     } catch (_) {}
     return false;
   }
@@ -164,52 +157,36 @@ class _PdvPageState extends State<PdvPage> {
       } catch (_) {
         if (mounted) setState(() => _serverOnline = false);
       }
-      // Atualiza status do caixa a cada batimento
       if (_role == 'cashier') {
         final open = await _fetchCashOpen();
         if (mounted) setState(() => _cashOpen = open);
       }
     }
 
-    // primeiro ping imediato
     ping();
     _hb = Timer.periodic(const Duration(seconds: 30), (_) => ping());
   }
 
-  // --------------------------- guardas de caixa ------------------------------
   Future<bool> _ensureCashOpen({bool silent = false}) async {
-    if (_isAdmin) return true;            // admin sempre pode
-    if (_role != 'cashier') return true;  // outros papéis não bloqueados aqui
-
+    if (_isAdmin) return true;
+    if (_role != 'cashier') return true;
     final open = await _fetchCashOpen();
     if (mounted) _cashOpen = open;
-
     if (open) return true;
-
-    if (!silent) {
-      _snack('Caixa fechado. Clique no botão "Caixa" acima e escolha "Abrir".');
-    }
+    if (!silent) _snack('Caixa fechado. Clique em "Caixa" e escolha "Abrir".');
     return false;
   }
 
-  // ====================== Produtos ==========================================
   Future<void> _addByCodeOrSearch() async {
     if (!await _ensureCashOpen()) return;
-
     final term = _codeCtl.text.trim();
-    if (term.isEmpty) {
-      await _openLookupDialog();
-      return;
-    }
+    if (term.isEmpty) { await _openLookupDialog(); return; }
 
     final close = _showBlockingOverlay(context, 'Buscando produto...');
     try {
       final p = await _repo.findByAnyCode(term).timeout(const Duration(seconds: 12));
-      if (p == null) {
-        _snack('Produto não encontrado.');
-        return;
-      }
-      _addProductParse(p); // padrão UN
+      if (p == null) { _snack('Produto não encontrado.'); return; }
+      _addProductParse(p);
       _codeCtl.clear();
     } on TimeoutException {
       _snack('Tempo esgotado na busca. Tente novamente.');
@@ -311,8 +288,7 @@ class _PdvPageState extends State<PdvPage> {
                         final name = (p.get<String>('name') ?? '').toUpperCase();
                         final sku = p.get<String>('sku') ??
                             p.get<String>('barcode') ??
-                            p.get<String>('code') ??
-                            '';
+                            p.get<String>('code') ?? '';
                         final imageUrl = p.get<ParseFileBase>('image')?.url;
 
                         final priceUn = (p.get<num>('price') ?? 0).toDouble();
@@ -347,7 +323,8 @@ class _PdvPageState extends State<PdvPage> {
                             ? ListTile(
                           leading: thumb(),
                           title: Text('$name cx'),
-                          subtitle: Text('CX com ${packQty.toStringAsFixed(packQty.truncateToDouble()==packQty?0:2)} un'),
+                          subtitle: Text(
+                              'CX com ${packQty.toStringAsFixed(packQty.truncateToDouble()==packQty?0:2)} un'),
                           trailing: Text(_money(packPrice)),
                           onTap: () {
                             Navigator.of(dctx).pop();
@@ -380,7 +357,6 @@ class _PdvPageState extends State<PdvPage> {
     _refocus();
   }
 
-  // Manuais/edição
   Future<void> _addManualDialog() async {
     if (!await _ensureCashOpen()) return;
 
@@ -515,13 +491,8 @@ class _PdvPageState extends State<PdvPage> {
     _refocus();
   }
 
-  // ====================== Finalização / pagamento ============================
-  void _goPayment() async {
-    if (!await _ensureCashOpen()) return;
-    if (_items.isEmpty) {
-      _snack('Inclua pelo menos um produto.');
-      return;
-    }
+  void _goPayment() {
+    if (_items.isEmpty) { _snack('Inclua pelo menos um produto.'); return; }
     setState(() {
       _stage = _PdvStage.payment;
       _selectedMethod = null;
@@ -539,26 +510,31 @@ class _PdvPageState extends State<PdvPage> {
     _refocus();
   }
 
+  void _onPixApproved() {
+    _snack('Pagamento aprovado (PIX).');
+    setState(() {
+      _items.clear();
+      _discount = 0;
+      _received = 0;
+      _codeCtl.clear();
+      _selectedIndex = null;
+      _selectedMethod = null;
+      _stage = _PdvStage.items;
+    });
+    _refocus();
+  }
+
   Future<void> _finalizeSale() async {
     if (!await _ensureCashOpen()) return;
-
     if (_items.isEmpty) { _snack('Inclua itens.'); return; }
     if (_selectedMethod == null) { _snack('Escolha a forma de pagamento.'); return; }
 
     final close = _showBlockingOverlay(context, 'Finalizando venda...');
     try {
       final itemsPayload = _items.map((e) {
-        final base = {
-          'qty': e.qty,
-          'unitPrice': e.unitPrice,  // preço mostrado (UN ou CX)
-          'uom': e.uom,              // 'UN' | 'CX'
-          'multiplier': e.multiplier // itens por caixa (1 para UN)
-        };
-        if (e.productId != null) {
-          return {'productId': e.productId, ...base};
-        } else {
-          return {'manual': true, 'name': e.name, ...base};
-        }
+        final base = {'qty': e.qty, 'unitPrice': e.unitPrice, 'uom': e.uom, 'multiplier': e.multiplier};
+        if (e.productId != null) return {'productId': e.productId, ...base};
+        return {'manual': true, 'name': e.name, ...base};
       }).toList();
 
       final fn = ParseCloudFunction('finalizeSale');
@@ -627,12 +603,10 @@ class _PdvPageState extends State<PdvPage> {
     }
   }
 
-  // ====================== Atalhos ===========================================
   KeyEventResult _onKey(FocusNode node, KeyEvent event) {
     if (event is! KeyDownEvent) return KeyEventResult.ignored;
     final k = event.logicalKey;
 
-    // Se caixa fechado para operador, ignoramos atalhos de inclusão/edição
     if (_needsCashOpen) {
       if (k == LogicalKeyboardKey.f8 || k == LogicalKeyboardKey.enter) {
         _snack('Caixa fechado. Abra o caixa para prosseguir.');
@@ -673,7 +647,6 @@ class _PdvPageState extends State<PdvPage> {
     return KeyEventResult.ignored;
   }
 
-  // ====================== UI =================================================
   @override
   Widget build(BuildContext context) {
     final closedBanner = _needsCashOpen
@@ -693,7 +666,7 @@ class _PdvPageState extends State<PdvPage> {
         child: Column(
           children: [
             _Header(priceTier: _priceTier, stage: _stage),
-            const CashboxBar(), // sua barra de caixa
+            const CashboxBar(),
             closedBanner,
             const SizedBox(height: 8),
 
@@ -711,7 +684,7 @@ class _PdvPageState extends State<PdvPage> {
                         onLookup: _openLookupDialog,
                       ),
                       const SizedBox(height: 8),
-                      const SizedBox(height: 8), // separador
+                      const SizedBox(height: 8),
                     ],
                   ),
                 ),
@@ -779,11 +752,13 @@ class _PdvPageState extends State<PdvPage> {
             ] else ...[
               _FinishForm(
                 method: _selectedMethod!,
+                items: _items,
                 total: _total,
                 received: _received,
                 change: _change,
                 onReceivedChanged: (v) => setState(() => _received = v),
                 onFinalize: _finalizeSale,
+                onPixApproved: _onPixApproved,
                 onBack: () => setState(() => _stage = _PdvStage.payment),
               ),
               const SizedBox(height: 12),
