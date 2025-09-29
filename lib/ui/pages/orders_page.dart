@@ -1,7 +1,9 @@
 // lib/ui/pages/orders_page.dart
 import 'dart:async';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:parse_server_sdk_flutter/parse_server_sdk_flutter.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 // Se existir no seu projeto, será usado; senão o código faz fallback para Query direta.
 import 'package:gerenciador_distribuidora/repositories/product_repository.dart';
@@ -129,7 +131,7 @@ class _OrdersPageState extends State<OrdersPage> {
                       itemBuilder: (_, i) {
                         final c = results[i];
                         final name = c.get<String>('name') ?? '-';
-                        final cpf = c.get<String>('cpf') ?? '';
+                        final cpf = c.get<String>('cpf') ?? c.get<String>('cpfCnpj') ?? '';
                         final phone = c.get<String>('phone') ?? '';
                         final email = c.get<String>('email') ?? '';
                         final sub = [cpf, phone, email]
@@ -363,76 +365,140 @@ class _OrdersPageState extends State<OrdersPage> {
     });
   }
 
+  // ====== Limite de crédito (cliente) ======
+  bool _violatesCreditLimit(double total) {
+    if (_selectedCustomer == null) return false; // sem cliente não valida
+    final limit = (_selectedCustomer!.get<num>('creditLimit') ?? 0).toDouble();
+    final open  = (_selectedCustomer!.get<num>('balance') ?? 0).toDouble();
+    final available = (limit - open);
+    return total > available && limit > 0; // só bloqueia se há limite configurado
+  }
+
   Future<void> _finalizeDraft() async {
     if (_draft == null || _draft!.items.isEmpty) {
       _snack('Crie o pedido e adicione itens.');
       return;
     }
 
+    // Valida limite de crédito
+    if (_violatesCreditLimit(_draft!.total)) {
+      final limit = (_selectedCustomer!.get<num>('creditLimit') ?? 0).toDouble();
+      final open  = (_selectedCustomer!.get<num>('balance') ?? 0).toDouble();
+      final available = (limit - open);
+      await showDialog<void>(
+        context: context,
+        builder: (dctx) => AlertDialog(
+          title: const Text('Limite de crédito'),
+          content: Text(
+              'Total do pedido: ${_money(_draft!.total)}\n'
+                  'Disponível: ${_money(available)}\n\n'
+                  'O total excede o limite de crédito do cliente.'),
+          actions: [
+            FilledButton(onPressed: () => Navigator.of(dctx).pop(), child: const Text('OK')),
+          ],
+        ),
+      );
+      return;
+    }
+
     final confirm = await showDialog<bool>(
       context: context,
       builder: (dctx) => AlertDialog(
-        title: const Text('Finalizar pedido'),
+        title: Text(_draft!.editingOrderId == null ? 'Finalizar pedido' : 'Atualizar pedido'),
         content: Text(
-            'Confirmar finalização?\n\nCliente: ${_draft!.customerName}\nItens: ${_draft!.items.length}\nTotal: ${_money(_draft!.total)}'),
+            'Confirmar ${_draft!.editingOrderId == null ? 'finalização' : 'atualização'}?\n\nCliente: ${_draft!.customerName}\nItens: ${_draft!.items.length}\nTotal: ${_money(_draft!.total)}'),
         actions: [
           TextButton(
               onPressed: () => Navigator.of(dctx).pop(false),
               child: const Text('Cancelar')),
           FilledButton(
               onPressed: () => Navigator.of(dctx).pop(true),
-              child: const Text('Finalizar')),
+              child: Text(_draft!.editingOrderId == null ? 'Finalizar' : 'Salvar')),
         ],
       ),
     );
     if (confirm != true) return;
 
-    final close = _showBlockingOverlay(context, 'Salvando pedido...');
+    final close = _showBlockingOverlay(context, _draft!.editingOrderId == null ? 'Salvando pedido...' : 'Salvando alterações...');
     try {
-      // monta objeto Order (com items como array de maps)
-      final order = ParseObject('Order')
-        ..set<String>('customerName', _draft!.customerName)
-        ..set<String>('status', 'open')
-        ..set<num>('total', _draft!.total)
-        ..set<List<dynamic>>(
-          'items',
-          _draft!.items
-              .map((e) => {
-            'productId': e.productId,
-            'name': e.name,
-            'unit': e.unit,
-            'qty': e.qty,
-            'unitPrice': e.unitPrice,
-          })
-              .toList(),
-        )
-        ..set<ParseObject>(
-          'customer',
-          (ParseObject('Customer')..objectId = _draft!.customerId),
+      // monta itens
+      final itemsArr = _draft!.items
+          .map((e) => {
+        'productId': e.productId,
+        'name': e.name,
+        'unit': e.unit,
+        'qty': e.qty,
+        'unitPrice': e.unitPrice,
+      })
+          .toList();
+
+      if (_draft!.editingOrderId != null) {
+        // ====== atualizar pedido existente ======
+        final order = ParseObject('Order')..objectId = _draft!.editingOrderId!;
+        order
+          ..set<String>('customerName', _draft!.customerName)
+          ..set<num>('total', _draft!.total)
+          ..set<List<dynamic>>('items', itemsArr)
+          ..set<ParseObject>('customer', ParseObject('Customer')..objectId = _draft!.customerId);
+        final resp = await order.save().timeout(const Duration(seconds: 18));
+        if (!resp.success) {
+          throw resp.error?.message ?? 'Falha ao salvar alterações.';
+        }
+        if (!mounted) return;
+        await showDialog<void>(
+          context: context,
+          builder: (dctx) => AlertDialog(
+            title: const Text('Pedido atualizado'),
+            content: Text('Alterações salvas com sucesso!\nTotal: ${_money(_draft!.total)}'),
+            actions: [
+              FilledButton(onPressed: () => Navigator.of(dctx).pop(), child: const Text('OK')),
+            ],
+          ),
         );
 
-      final resp =
-      await order.save().timeout(const Duration(seconds: 18));
-      if (!resp.success) {
-        throw resp.error?.message ?? 'Falha ao salvar pedido.';
+        // opcional: re-gerar boleto (se desejar manter o comportamento)
+        final boleto = await _createBoleto(_draft!.editingOrderId!, _draft!.total, _draft!.customerId);
+        if (boleto != null && mounted) {
+          await _showBoletoDialog(boleto);
+        }
+      } else {
+        // ====== criar novo pedido (fluxo existente) ======
+        final order = ParseObject('Order')
+          ..set<String>('customerName', _draft!.customerName)
+          ..set<String>('status', 'open')
+          ..set<num>('total', _draft!.total)
+          ..set<List<dynamic>>('items', itemsArr)
+          ..set<ParseObject>('customer', (ParseObject('Customer')..objectId = _draft!.customerId));
+
+        final resp = await order.save().timeout(const Duration(seconds: 18));
+        if (!resp.success) {
+          throw resp.error?.message ?? 'Falha ao salvar pedido.';
+        }
+
+        final saved = (resp.results?.first as ParseObject);
+        final id = saved.objectId!;
+
+        if (!mounted) return;
+        await showDialog<void>(
+          context: context,
+          builder: (dctx) => AlertDialog(
+            title: const Text('Pedido salvo'),
+            content: Text(
+                'Pedido #${id.substring(0, 6).toUpperCase()} salvo com sucesso!\nTotal: ${_money(_draft!.total)}'),
+            actions: [
+              FilledButton(
+                  onPressed: () => Navigator.of(dctx).pop(),
+                  child: const Text('OK')),
+            ],
+          ),
+        );
+
+        // === Gere o boleto automaticamente ===
+        final boleto = await _createBoleto(id, _draft!.total, _draft!.customerId);
+        if (boleto != null && mounted) {
+          await _showBoletoDialog(boleto);
+        }
       }
-
-      final id = (resp.results?.first as ParseObject).objectId!;
-
-      if (!mounted) return;
-      await showDialog<void>(
-        context: context,
-        builder: (dctx) => AlertDialog(
-          title: const Text('Pedido salvo'),
-          content: Text(
-              'Pedido #${id.substring(0, 6).toUpperCase()} salvo com sucesso!\nTotal: ${_money(_draft!.total)}'),
-          actions: [
-            FilledButton(
-                onPressed: () => Navigator.of(dctx).pop(),
-                child: const Text('OK')),
-          ],
-        ),
-      );
 
       // limpa rascunho e recarrega "últimos pedidos"
       setState(() {
@@ -440,7 +506,7 @@ class _OrdersPageState extends State<OrdersPage> {
       });
       await _loadRecentOrders();
     } on TimeoutException {
-      _snack('Tempo esgotado ao salvar pedido.');
+      _snack('Tempo esgotado ao salvar.');
     } catch (e) {
       _snack('Erro: $e');
     } finally {
@@ -466,6 +532,236 @@ class _OrdersPageState extends State<OrdersPage> {
     } finally {
       setState(() => _loadingRecent = false);
     }
+  }
+
+  // ==== chama cloud para gerar boleto ====
+  Future<_BoletoInfo?> _createBoleto(String orderId, double amount, String customerId) async {
+    try {
+      final fn = ParseCloudFunction('mpCreateBoleto');
+      final resp = await fn.execute(parameters: {
+        'orderId': orderId,
+        'amount': amount,
+        'customerId': customerId,
+        'description': 'Pedido $orderId',
+        'daysToExpire': 3,
+      }).timeout(const Duration(seconds: 20));
+
+      if (resp.success && resp.result is Map) {
+        final m = (resp.result as Map).cast<String, dynamic>();
+        final url = (m['boleto_url'] ?? m['external_resource_url'] ?? m['pdf_url'])?.toString();
+        final status = (m['status'] ?? 'pending').toString();
+        final barcode = (m['barcode'] ?? '').toString();
+        return _BoletoInfo(url: url, status: status, barcode: barcode);
+      } else {
+        _snack('Falha ao gerar boleto.');
+      }
+    } catch (e) {
+      _snack('Erro ao gerar boleto: $e');
+    }
+    return null;
+  }
+
+  Future<void> _showBoletoDialog(_BoletoInfo boleto) async {
+    await showDialog<void>(
+      context: context,
+      builder: (dctx) => AlertDialog(
+        title: const Text('Boleto gerado'),
+        content: Text('Link do boleto pronto para o cliente.\nStatus: ${boleto.status ?? 'pending'}'),
+        actions: [
+          TextButton(
+            onPressed: () async {
+              final url = boleto.url!;
+              await Clipboard.setData(ClipboardData(text: url));
+              if (mounted) {
+                Navigator.of(dctx).pop();
+                _snack('Link copiado.');
+              }
+            },
+            child: const Text('Copiar link'),
+          ),
+          FilledButton(
+            onPressed: () async {
+              final url = boleto.url!;
+              final uri = Uri.tryParse(url);
+              if (uri != null) {
+                await launchUrl(uri, mode: LaunchMode.externalApplication);
+              }
+            },
+            child: const Text('Abrir boleto (PDF)'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // ======= AÇÕES SOBRE UM PEDIDO LISTADO (menu contextual) =======
+  Future<void> _openOrderActions(ParseObject o) async {
+    await showModalBottomSheet<void>(
+      context: context,
+      showDragHandle: true,
+      builder: (ctx) {
+        final id = o.objectId ?? '';
+        final boletoUrl = (o.get<String>('boletoUrl') ?? '').trim();
+        return SafeArea(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              ListTile(
+                leading: const Icon(Icons.edit_outlined),
+                title: const Text('Editar pedido'),
+                subtitle: Text('#${id.substring(0,6).toUpperCase()}'),
+                onTap: () async {
+                  Navigator.of(ctx).pop();
+                  await _loadOrderIntoDraft(o);
+                },
+              ),
+              ListTile(
+                leading: const Icon(Icons.print_outlined),
+                title: Text(boletoUrl.isEmpty ? 'Gerar boleto' : 'Abrir boleto (reimprimir)'),
+                onTap: () async {
+                  Navigator.of(ctx).pop();
+                  await _openOrCreateBoleto(o);
+                },
+              ),
+              ListTile(
+                leading: const Icon(Icons.link_outlined),
+                title: const Text('Copiar link do boleto'),
+                onTap: () async {
+                  Navigator.of(ctx).pop();
+                  final url = (o.get<String>('boletoUrl') ?? '').trim();
+                  if (url.isEmpty) {
+                    _snack('Pedido ainda não possui boleto.');
+                    return;
+                  }
+                  await Clipboard.setData(ClipboardData(text: url));
+                  _snack('Link copiado.');
+                },
+              ),
+              ListTile(
+                leading: const Icon(Icons.rule_folder_outlined),
+                title: const Text('Alterar status / pagamento'),
+                onTap: () async {
+                  Navigator.of(ctx).pop();
+                  await _changeOrderStatus(o);
+                },
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  Future<void> _openOrCreateBoleto(ParseObject o) async {
+    final orderId = o.objectId!;
+    final urlSaved = (o.get<String>('boletoUrl') ?? '').trim();
+    if (urlSaved.isNotEmpty) {
+      final uri = Uri.tryParse(urlSaved);
+      if (uri != null) {
+        await launchUrl(uri, mode: LaunchMode.externalApplication);
+        return;
+      }
+    }
+    final total = (o.get<num>('total') ?? 0).toDouble();
+    final custRef = o.get<ParseObject>('customer');
+    final custId = custRef?.objectId ?? '';
+    final boleto = await _createBoleto(orderId, total, custId);
+    if (boleto != null) await _showBoletoDialog(boleto);
+  }
+
+  Future<void> _changeOrderStatus(ParseObject o) async {
+    String status = (o.get<String>('status') ?? 'open').toLowerCase();
+    String payStatus = (o.get<String>('paymentStatus') ?? 'pending').toLowerCase();
+    String payMethod = (o.get<String>('paymentMethod') ?? '').toUpperCase();
+
+    final statusOpts = ['open','done','cancelled'];
+    final payStatusOpts = ['pending','approved','cancelled','rejected','expired'];
+    final payMethodOpts = ['','BOLETO','PIX','DINHEIRO','CARTAO','OUTRO'];
+
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (dctx) => AlertDialog(
+        title: const Text('Alterar status / pagamento'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            _dropdownRow('Status', status, statusOpts, (v)=> status=v),
+            const SizedBox(height: 8),
+            _dropdownRow('Situação do pagamento', payStatus, payStatusOpts, (v)=> payStatus=v),
+            const SizedBox(height: 8),
+            _dropdownRow('Forma de pagamento', payMethod, payMethodOpts, (v)=> payMethod=v.toUpperCase()),
+          ],
+        ),
+        actions: [
+          TextButton(onPressed: ()=>Navigator.of(dctx).pop(false), child: const Text('Cancelar')),
+          FilledButton(onPressed: ()=>Navigator.of(dctx).pop(true), child: const Text('Salvar')),
+        ],
+      ),
+    );
+
+    if (ok != true) return;
+
+    final close = _showBlockingOverlay(context, 'Atualizando...');
+    try {
+      final order = ParseObject('Order')..objectId = o.objectId!;
+      order
+        ..set<String>('status', status)
+        ..set<String>('paymentStatus', payStatus)
+        ..set<String>('paymentMethod', payMethod);
+      final resp = await order.save().timeout(const Duration(seconds: 12));
+      if (!resp.success) throw resp.error?.message ?? 'Falha ao atualizar.';
+      _snack('Atualizado.');
+      await _loadRecentOrders();
+    } catch (e) {
+      _snack('Erro: $e');
+    } finally {
+      close();
+    }
+  }
+
+  Widget _dropdownRow(String label, String value, List<String> options, void Function(String) onChanged) {
+    return Row(
+      children: [
+        SizedBox(width: 170, child: Text(label)),
+        const SizedBox(width: 8),
+        Expanded(
+          child: DropdownButtonFormField<String>(
+            value: options.contains(value) ? value : options.first,
+            items: options.map((e)=>DropdownMenuItem(value:e,child: Text(e.toUpperCase()))).toList(),
+            onChanged: (v){ if(v!=null) onChanged(v); },
+          ),
+        ),
+      ],
+    );
+  }
+
+  Future<void> _loadOrderIntoDraft(ParseObject o) async {
+    final items = (o.get<List>('items') ?? []).cast<dynamic>();
+    final custRef = o.get<ParseObject>('customer');
+    final custId = custRef?.objectId ?? '';
+    final custName = o.get<String>('customerName') ?? 'Cliente';
+
+    final d = _OrderDraft(customerId: custId, customerName: custName, editingOrderId: o.objectId);
+    for (final raw in items) {
+      if (raw is Map) {
+        final m = raw.cast<String, dynamic>();
+        d.addItem(_OrderItem(
+          productId: (m['productId'] ?? '').toString(),
+          name: (m['name'] ?? 'Produto').toString(),
+          unit: (m['unit'] ?? 'UN').toString(),
+          qty: (m['qty'] is num) ? (m['qty'] as num).toDouble() : double.tryParse('${m['qty']}') ?? 0,
+          unitPrice: (m['unitPrice'] is num) ? (m['unitPrice'] as num).toDouble() : double.tryParse('${m['unitPrice']}') ?? 0,
+        ));
+      }
+    }
+
+    setState(() {
+      _draft = d;
+      // Também posiciona o cliente selecionado para manter a consistência do cabeçalho
+      _selectedCustomer = custRef;
+    });
+
+    _snack('Pedido carregado para edição.');
   }
 
   // =============================================================================
@@ -568,7 +864,7 @@ class _OrdersPageState extends State<OrdersPage> {
             onPressed:
             (_draft != null && _draft!.items.isNotEmpty) ? _finalizeDraft : null,
             icon: const Icon(Icons.check_circle),
-            label: const Text('Finalizar pedido'),
+            label: Text(_draft?.editingOrderId == null ? 'Finalizar pedido' : 'Salvar alterações'),
           ),
         ],
       ),
@@ -604,6 +900,9 @@ class _OrdersPageState extends State<OrdersPage> {
                             'Cliente: ${_draft!.customerName}'),
                         subtitle: Text(
                             'Itens: ${_draft!.items.length} • Total: ${_money(_draft!.total)}'),
+                        trailing: _draft!.editingOrderId == null
+                            ? null
+                            : const Chip(label: Text('Edição')),
                       );
                     }
                     final it = _draft!.items[i - 1];
@@ -671,14 +970,46 @@ class _OrdersPageState extends State<OrdersPage> {
                     final status =
                         o.get<String>('status') ?? '-';
                     return ListTile(
+                      onTap: () => _openOrderActions(o),
                       title: Text(
                           '#${id.substring(0, 6).toUpperCase()} • $customerName'),
                       subtitle:
                       Text('Itens: $items • Status: $status'),
-                      trailing: Text(_money(total),
-                          style: const TextStyle(
-                              fontWeight:
-                              FontWeight.w700)),
+                      trailing: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Text(_money(total),
+                              style: const TextStyle(
+                                  fontWeight: FontWeight.w700)),
+                          const SizedBox(width: 6),
+                          PopupMenuButton<String>(
+                            tooltip: 'Ações',
+                            onSelected: (v) async {
+                              if (v == 'edit') {
+                                await _loadOrderIntoDraft(o);
+                              } else if (v == 'boleto') {
+                                await _openOrCreateBoleto(o);
+                              } else if (v == 'copy') {
+                                final url = (o.get<String>('boletoUrl') ?? '').trim();
+                                if (url.isEmpty) {
+                                  _snack('Sem boleto ainda.');
+                                } else {
+                                  await Clipboard.setData(ClipboardData(text: url));
+                                  _snack('Link copiado.');
+                                }
+                              } else if (v == 'status') {
+                                await _changeOrderStatus(o);
+                              }
+                            },
+                            itemBuilder: (ctx) => [
+                              const PopupMenuItem(value: 'edit', child: ListTile(leading: Icon(Icons.edit_outlined), title: Text('Editar'))),
+                              const PopupMenuItem(value: 'boleto', child: ListTile(leading: Icon(Icons.print_outlined), title: Text('Abrir/gerar boleto'))),
+                              const PopupMenuItem(value: 'copy', child: ListTile(leading: Icon(Icons.link_outlined), title: Text('Copiar link do boleto'))),
+                              const PopupMenuItem(value: 'status', child: ListTile(leading: Icon(Icons.rule_folder_outlined), title: Text('Alterar status'))),
+                            ],
+                          ),
+                        ],
+                      ),
                     );
                   },
                 ),
@@ -723,9 +1054,10 @@ class _OrdersPageState extends State<OrdersPage> {
 // Modelos simples do rascunho (somente UI/cliente)
 // ============================================================================
 class _OrderDraft {
-  _OrderDraft({required this.customerId, required this.customerName});
+  _OrderDraft({required this.customerId, required this.customerName, this.editingOrderId});
   final String customerId;
   final String customerName;
+  final String? editingOrderId;
   final List<_OrderItem> items = [];
 
   void addItem(_OrderItem it) {
@@ -775,6 +1107,13 @@ class _OrderItem {
       unitPrice: unitPrice ?? this.unitPrice,
     );
   }
+}
+
+class _BoletoInfo {
+  final String? url;
+  final String? status;
+  final String? barcode;
+  _BoletoInfo({this.url, this.status, this.barcode});
 }
 
 // ===== Overlay progress (mesmo padrão do PDV) =================================

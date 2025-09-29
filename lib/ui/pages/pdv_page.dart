@@ -5,10 +5,14 @@ import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:parse_server_sdk_flutter/parse_server_sdk_flutter.dart';
+import 'package:gerenciador_distribuidora/ui/pages/pdv/sound_fx.dart' hide SoundFx;
+
+import 'package:gerenciador_distribuidora/ui/widgets/global_hotkeys.dart';
 
 import 'package:gerenciador_distribuidora/repositories/product_repository.dart';
 import 'package:gerenciador_distribuidora/features/cashbox/cashbox_bar.dart';
 
+import '../../domain/services/sound_fx.dart';
 import '../widgets/payment_pix_dialog.dart';
 
 // ===== PARTS ================================================================
@@ -32,6 +36,25 @@ enum _PayMethod {
 
 // ===== Helpers globais ======================================================
 String _money(num v) => 'R\$ ${v.toStringAsFixed(2).replaceAll('.', ',')}';
+
+/// Item “achatado” para a lista de escolhas do diálogo de busca (com índice/tecla).
+class _Choice {
+  _Choice({
+    required this.p,
+    required this.isCx,
+    required this.priceShown,
+    required this.packQty,
+    required this.imageUrl,
+    required this.label,
+  });
+
+  final ParseObject p;
+  final bool isCx;               // false = UN, true = CX
+  final double priceShown;       // preço mostrado no tile
+  final double packQty;          // >0 quando cx
+  final String? imageUrl;
+  final String label;            // ex: "COCA COLA - LATA 350ML un\nSKU: ..."
+}
 
 // ===== PAGE =================================================================
 class PdvPage extends StatefulWidget {
@@ -241,119 +264,25 @@ class _PdvPageState extends State<PdvPage> {
   Future<void> _openLookupDialog() async {
     if (!await _ensureCashOpen()) return;
 
-    final termCtl = TextEditingController(text: _codeCtl.text);
-    List<ParseObject> results = [];
-    bool loading = false;
-
     await showDialog<void>(
       context: context,
       useRootNavigator: true,
-      builder: (dctx) => StatefulBuilder(
-        builder: (dctx, setDState) {
-          Future<void> doSearchLocal() async {
-            setDState(() => loading = true);
-            try {
-              results = await _repo.searchProducts(termCtl.text.trim(), limit: 40);
-            } finally {
-              setDState(() => loading = false);
-            }
-          }
-
-          return AlertDialog(
-            title: const Text('Buscar Produto (F2)'),
-            content: SizedBox(
-              width: 580, height: 420,
-              child: Column(
-                children: [
-                  TextField(
-                    controller: termCtl,
-                    onSubmitted: (_) => doSearchLocal(),
-                    decoration: const InputDecoration(
-                      hintText: 'Digite nome/sku/código de barras',
-                      prefixIcon: Icon(Icons.search),
-                      border: OutlineInputBorder(),
-                    ),
-                  ),
-                  const SizedBox(height: 10),
-                  Expanded(
-                    child: loading
-                        ? const Center(child: CircularProgressIndicator())
-                        : results.isEmpty
-                        ? const Center(child: Text('Sem resultados'))
-                        : ListView.separated(
-                      itemCount: results.length,
-                      separatorBuilder: (_, __) => const Divider(height: 1),
-                      itemBuilder: (_, i) {
-                        final p = results[i];
-                        final name = (p.get<String>('name') ?? '').toUpperCase();
-                        final sku = p.get<String>('sku') ??
-                            p.get<String>('barcode') ??
-                            p.get<String>('code') ?? '';
-                        final imageUrl = p.get<ParseFileBase>('image')?.url;
-
-                        final priceUn = (p.get<num>('price') ?? 0).toDouble();
-                        final packPrice = (p.get<num>('packPrice') ?? 0).toDouble();
-                        final packQty = (p.get<num>('packQty') ?? 0).toDouble();
-
-                        final hasCx = packQty > 0 && packPrice > 0;
-
-                        Widget thumb() => ClipRRect(
-                          borderRadius: BorderRadius.circular(6),
-                          child: imageUrl == null
-                              ? Container(
-                            width: 40, height: 40, color: Colors.black12,
-                            child: const Icon(Icons.inventory_2, size: 22),
-                          )
-                              : Image.network(imageUrl, width: 40, height: 40, fit: BoxFit.cover),
-                        );
-
-                        final unTile = ListTile(
-                          leading: thumb(),
-                          title: Text('$name un'),
-                          subtitle: Text('SKU: $sku'),
-                          trailing: Text(_money(priceUn)),
-                          onTap: () {
-                            Navigator.of(dctx).pop();
-                            _addProductParse(p, uom: 'UN', overridePrice: priceUn);
-                            _refocus();
-                          },
-                        );
-
-                        final cxTile = hasCx
-                            ? ListTile(
-                          leading: thumb(),
-                          title: Text('$name cx'),
-                          subtitle: Text(
-                              'CX com ${packQty.toStringAsFixed(packQty.truncateToDouble()==packQty?0:2)} un'),
-                          trailing: Text(_money(packPrice)),
-                          onTap: () {
-                            Navigator.of(dctx).pop();
-                            _addProductParse(
-                              p,
-                              uom: 'CX',
-                              multiplier: packQty,
-                              overridePrice: packPrice,
-                            );
-                            _refocus();
-                          },
-                        )
-                            : null;
-
-                        return Column(children: [unTile, if (cxTile != null) cxTile]);
-                      },
-                    ),
-                  ),
-                ],
-              ),
-            ),
-            actions: [
-              TextButton(onPressed: () { Navigator.of(dctx).pop(); _refocus(); }, child: const Text('Fechar')),
-              FilledButton(onPressed: () async { await doSearchLocal(); }, child: const Text('Buscar')),
-            ],
+      builder: (dctx) => _PdvSearchDialog(
+        initialTerm: _codeCtl.text,
+        searchFn: (term) => _repo.searchProducts(term, limit: 40),
+        onPick: (ParseObject p, {required bool isCx, required double packQty, required double priceShown}) {
+          Navigator.of(dctx).pop();
+          _addProductParse(
+            p,
+            uom: isCx ? 'CX' : 'UN',
+            multiplier: packQty > 0 ? packQty : 1,
+            overridePrice: priceShown,
           );
+          _refocus();
         },
       ),
     );
+
     _refocus();
   }
 
@@ -484,10 +413,7 @@ class _PdvPageState extends State<PdvPage> {
         ],
       ),
     );
-    if (ok == true) {
-      final v = _parseDecimal(ctl.text);
-      if (v >= 0) setState(() => _discount = v);
-    }
+    if (ok == true) setState(() => _discount = _parseDecimal(ctl.text));
     _refocus();
   }
 
@@ -771,4 +697,182 @@ class _PdvPageState extends State<PdvPage> {
 
   void _snack(String m) =>
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(m)));
+}
+
+/// ===== Diálogo de busca com atalho numérico global via RawKeyboard ==========
+class _PdvSearchDialog extends StatefulWidget {
+  const _PdvSearchDialog({
+    required this.initialTerm,
+    required this.searchFn,
+    required this.onPick,
+  });
+
+  final String initialTerm;
+  final Future<List<ParseObject>> Function(String term) searchFn;
+  final void Function(ParseObject p, {required bool isCx, required double packQty, required double priceShown}) onPick;
+
+  @override
+  State<_PdvSearchDialog> createState() => _PdvSearchDialogState();
+}
+
+class _PdvSearchDialogState extends State<_PdvSearchDialog> {
+  late final TextEditingController _termCtl = TextEditingController(text: widget.initialTerm);
+  bool _loading = false;
+  final List<_Choice> _choices = [];
+
+  @override
+  void initState() {
+    super.initState();
+    RawKeyboard.instance.addListener(_rawKeyHandler);
+    if (_termCtl.text.trim().isNotEmpty) _doSearch();
+  }
+
+  @override
+  void dispose() {
+    RawKeyboard.instance.removeListener(_rawKeyHandler);
+    _termCtl.dispose();
+    super.dispose();
+  }
+
+  void _rawKeyHandler(RawKeyEvent e) {
+    if (e is! RawKeyDownEvent) return;
+    // Ignora se estiver com modificadores
+    if (e.isAltPressed || e.isMetaPressed || e.isControlPressed) return;
+
+    int? idx;
+    final k = e.logicalKey;
+    if (k == LogicalKeyboardKey.digit1 || k == LogicalKeyboardKey.numpad1) idx = 0;
+    else if (k == LogicalKeyboardKey.digit2 || k == LogicalKeyboardKey.numpad2) idx = 1;
+    else if (k == LogicalKeyboardKey.digit3 || k == LogicalKeyboardKey.numpad3) idx = 2;
+    else if (k == LogicalKeyboardKey.digit4 || k == LogicalKeyboardKey.numpad4) idx = 3;
+    else if (k == LogicalKeyboardKey.digit5 || k == LogicalKeyboardKey.numpad5) idx = 4;
+    else if (k == LogicalKeyboardKey.digit6 || k == LogicalKeyboardKey.numpad6) idx = 5;
+    else if (k == LogicalKeyboardKey.digit7 || k == LogicalKeyboardKey.numpad7) idx = 6;
+    else if (k == LogicalKeyboardKey.digit8 || k == LogicalKeyboardKey.numpad8) idx = 7;
+    else if (k == LogicalKeyboardKey.digit9 || k == LogicalKeyboardKey.numpad9) idx = 8;
+    else if (k == LogicalKeyboardKey.digit0 || k == LogicalKeyboardKey.numpad0) idx = 9;
+
+    if (idx == null) return;
+    if (idx >= 0 && idx < _choices.length) {
+      final c = _choices[idx];
+      widget.onPick(c.p, isCx: c.isCx, packQty: c.packQty, priceShown: c.priceShown);
+    }
+  }
+
+  Future<void> _doSearch() async {
+    setState(() => _loading = true);
+    try {
+      final results = await widget.searchFn(_termCtl.text.trim());
+      _choices
+        ..clear()
+        ..addAll(_flatten(results));
+    } finally {
+      if (mounted) setState(() => _loading = false);
+    }
+  }
+
+  List<_Choice> _flatten(List<ParseObject> results) {
+    final list = <_Choice>[];
+    for (final p in results) {
+      final name = (p.get<String>('name') ?? '').toUpperCase();
+      final sku = p.get<String>('sku') ?? p.get<String>('barcode') ?? p.get<String>('code') ?? '';
+      final imageUrl = p.get<ParseFileBase>('image')?.url;
+
+      final priceUn = (p.get<num>('price') ?? 0).toDouble();
+      final packPrice = (p.get<num>('packPrice') ?? 0).toDouble();
+      final packQty = (p.get<num>('packQty') ?? 0).toDouble();
+
+      list.add(_Choice(
+        p: p,
+        isCx: false,
+        priceShown: priceUn,
+        packQty: 1,
+        imageUrl: imageUrl,
+        label: '$name un\nSKU: $sku',
+      ));
+      if (packQty > 0 && packPrice > 0) {
+        list.add(_Choice(
+          p: p,
+          isCx: true,
+          priceShown: packPrice,
+          packQty: packQty,
+          imageUrl: imageUrl,
+          label: '$name cx\nCX com ${packQty.toStringAsFixed(packQty.truncateToDouble()==packQty?0:2)} un',
+        ));
+      }
+    }
+    return list;
+  }
+
+  Widget _thumb(String? url) => ClipRRect(
+    borderRadius: BorderRadius.circular(6),
+    child: url == null
+        ? Container(width: 40, height: 40, color: Colors.black12, child: const Icon(Icons.inventory_2, size: 22))
+        : Image.network(url, width: 40, height: 40, fit: BoxFit.cover),
+  );
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text('Buscar Produto (F2)'),
+      content: SizedBox(
+        width: 580, height: 420,
+        child: Column(
+          children: [
+            TextField(
+              controller: _termCtl,
+              onSubmitted: (_) => _doSearch(),
+              decoration: const InputDecoration(
+                hintText: 'Digite nome/sku/código de barras',
+                prefixIcon: Icon(Icons.search),
+                border: OutlineInputBorder(),
+              ),
+            ),
+            const SizedBox(height: 10),
+            Expanded(
+              child: _loading
+                  ? const Center(child: CircularProgressIndicator())
+                  : _choices.isEmpty
+                  ? const Center(child: Text('Sem resultados'))
+                  : ListView.separated(
+                itemCount: _choices.length,
+                separatorBuilder: (_, __) => const Divider(height: 1),
+                itemBuilder: (_, i) {
+                  final c = _choices[i];
+                  return ListTile(
+                    leading: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        CircleAvatar(
+                          radius: 12,
+                          backgroundColor: Theme.of(context).colorScheme.secondaryContainer,
+                          child: Text('${i + 1}', style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w700)),
+                        ),
+                        const SizedBox(width: 8),
+                        _thumb(c.imageUrl),
+                      ],
+                    ),
+                    title: Text(
+                      c.label.split('\n').first,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                    subtitle: (c.label.contains('\n'))
+                        ? Text(c.label.split('\n')[1], maxLines: 1, overflow: TextOverflow.ellipsis)
+                        : null,
+                    trailing: Text(_money(c.priceShown)),
+                    onTap: () => widget.onPick(c.p, isCx: c.isCx, packQty: c.packQty, priceShown: c.priceShown),
+                  );
+                },
+              ),
+            ),
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(onPressed: () => Navigator.of(context).pop(), child: const Text('Fechar')),
+        FilledButton(onPressed: _doSearch, child: const Text('Buscar')),
+      ],
+    );
+  }
 }

@@ -1,5 +1,7 @@
+import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
+import 'package:http/http.dart' as http;
 
 import '../../../repositories/customer_repository.dart';
 
@@ -32,6 +34,7 @@ class _CustomerFormPageState extends State<CustomerFormPage> {
 
   bool active = true;
   bool loading = false;
+  bool _cepLoading = false;
 
   @override
   void initState() {
@@ -55,7 +58,7 @@ class _CustomerFormPageState extends State<CustomerFormPage> {
       final c = await _repo.getById(widget.customerId!);
       if (c != null) {
         name.text = c.get<String>('name') ?? '';
-        cpfCnpj.text = c.get<String>('cpfCnpj') ?? '';
+        cpfCnpj.text = c.get<String>('cpfCnpj') ?? c.get<String>('cpf') ?? '';
         phone.text = c.get<String>('phone') ?? '';
         email.text = c.get<String>('email') ?? '';
         zip.text = c.get<String>('zip') ?? '';
@@ -113,6 +116,37 @@ class _CustomerFormPageState extends State<CustomerFormPage> {
       }
     } finally {
       if (mounted) setState(() => loading = false);
+    }
+  }
+
+  // ================= CEP -> ViaCEP =================
+  Future<void> _tryFetchAddressByCep() async {
+    final digits = zip.text.replaceAll(RegExp(r'\D'), '');
+    if (digits.length != 8) return;
+    if (_cepLoading) return;
+
+    setState(() => _cepLoading = true);
+    try {
+      final uri = Uri.parse('https://viacep.com.br/ws/$digits/json/');
+      final r = await http.get(uri).timeout(const Duration(seconds: 8));
+      if (r.statusCode == 200 && r.body.isNotEmpty) {
+        final data = json.decode(r.body) as Map<String, dynamic>;
+        if (data['erro'] == true) {
+          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('CEP não encontrado.')));
+          return;
+        }
+        // Só preenche se os campos estiverem vazios (evita apagar algo já digitado)
+        if ((street.text).trim().isEmpty) street.text = (data['logradouro'] ?? '').toString();
+        if ((neighborhood.text).trim().isEmpty) neighborhood.text = (data['bairro'] ?? '').toString();
+        if ((city.text).trim().isEmpty) city.text = (data['localidade'] ?? '').toString();
+        if ((stateCtl.text).trim().isEmpty) stateCtl.text = (data['uf'] ?? '').toString();
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Falha ao consultar CEP.')));
+      }
+    } catch (_) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Erro ao consultar CEP.')));
+    } finally {
+      if (mounted) setState(() => _cepLoading = false);
     }
   }
 
@@ -174,7 +208,29 @@ class _CustomerFormPageState extends State<CustomerFormPage> {
               spacing: 12,
               runSpacing: 12,
               children: [
-                _field(TextFormField(controller: zip, decoration: const InputDecoration(labelText: 'CEP')), flex: 1),
+                _field(
+                  TextFormField(
+                    controller: zip,
+                    decoration: InputDecoration(
+                      labelText: 'CEP',
+                      suffixIcon: _cepLoading
+                          ? const Padding(
+                        padding: EdgeInsets.all(12.0),
+                        child: SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2)),
+                      )
+                          : IconButton(
+                        icon: const Icon(Icons.search),
+                        tooltip: 'Buscar CEP',
+                        onPressed: _tryFetchAddressByCep,
+                      ),
+                    ),
+                    onChanged: (_) {
+                      final digits = zip.text.replaceAll(RegExp(r'\D'), '');
+                      if (digits.length == 8) _tryFetchAddressByCep();
+                    },
+                  ),
+                  flex: 1,
+                ),
                 _field(TextFormField(controller: street, decoration: const InputDecoration(labelText: 'Rua')), flex: 3),
                 _field(TextFormField(controller: number, decoration: const InputDecoration(labelText: 'Número')), flex: 1),
                 _field(TextFormField(controller: neighborhood, decoration: const InputDecoration(labelText: 'Bairro')), flex: 2),
